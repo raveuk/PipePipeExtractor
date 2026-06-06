@@ -103,9 +103,7 @@ public abstract class StreamingService {
     private String proxyToken = null;
     private Boolean proxyEnabled = false;
     private Set<String> cookieFunctions = null;
-    private Localization contentLanguage = null;
     private String audioLanguage = "original";
-    private boolean showAutoTranslatedSubtitles = false;
 
     public Set<String> filterTypes = new HashSet<>();
     public InfoItemsCollector.FilterConfig filterConfig = null;
@@ -114,6 +112,7 @@ public abstract class StreamingService {
     
     private int loadingTimeout = 5;
     private boolean fetchFullPlaylist = false;
+    private boolean fetchDislike = true;
     private long feedFetchInterval = 0;
 
 
@@ -531,28 +530,12 @@ public abstract class StreamingService {
         this.cookieFunctions = cookieFunctions;
     }
 
-    public void setContentLanguage(Localization contentLanguage) {
-        this.contentLanguage = contentLanguage;
-    }
-
-    public Localization getContentLanguage() {
-        return contentLanguage;
-    }
-
     public String getAudioLanguage() {
         return audioLanguage;
     }
 
     public void setAudioLanguage(String audioLanguage) {
         this.audioLanguage = audioLanguage;
-    }
-
-    public boolean getShowAutoTranslatedSubtitles() {
-        return showAutoTranslatedSubtitles;
-    }
-
-    public void setShowAutoTranslatedSubtitles(boolean showAutoTranslatedSubtitles) {
-        this.showAutoTranslatedSubtitles = showAutoTranslatedSubtitles;
     }
 
     public Set<String> getFilterTypes() {
@@ -610,6 +593,14 @@ public abstract class StreamingService {
 
     public void setFetchFullPlaylist(boolean fetchFullPlaylist) {
         this.fetchFullPlaylist = fetchFullPlaylist;
+    }
+
+    public boolean isFetchDislike() {
+        return fetchDislike;
+    }
+
+    public void setFetchDislike(boolean fetchDislike) {
+        this.fetchDislike = fetchDislike;
     }
 
     public long getFeedFetchInterval() {

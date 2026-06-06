@@ -1,13 +1,12 @@
 plugins {
     id 'checkstyle'
-    id 'com.squareup.wire' version '4.4.0'
+    id 'com.squareup.wire' version '6.4.0'
 }
 
 checkstyle {
     getConfigDirectory().set(rootProject.file("checkstyle"))
     ignoreFailures false
     showViolations true
-    toolVersion checkstyleVersion
 }
 
 wire {
@@ -28,9 +27,7 @@ dependencies {
     implementation "org.brotli:dec:0.1.1"
     implementation 'org.apache.commons:commons-lang3:3.8.1'
     implementation 'commons-codec:commons-codec:1.16.0'
-    implementation "org.json:json:20231013"
-    implementation 'org.cache2k:cache2k-api:2.6.1.Final'
-    implementation 'org.cache2k:cache2k-core:2.6.1.Final'
+    compileOnly "org.json:json:20231013"
 
 
     // do not upgrade to 1.7.14, since in 1.7.14 Rhino uses the `SourceVersion` class, which is not
