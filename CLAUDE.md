@@ -8,7 +8,7 @@
 - **Upstream (gốc):** `InfinityLoop1308/PipePipeExtractor`
 - Fork đã **rename toàn bộ namespace**: `org.schabi.newpipe.extractor` → `dev.maxrave.pipepipe.extractor`
   (kèm Maven group `dev.maxrave`, proto `java_package` `dev.maxrave.pipepipe`).
-- Định danh fork: version `v6.0.0`, group `dev.maxrave` (trong `build.gradle`).
+- Định danh fork: version `v6.0.1`, group `dev.maxrave` (trong `build.gradle`).
 
 ## Nguyên tắc pull update từ upstream (QUAN TRỌNG)
 
@@ -22,6 +22,12 @@ Khi resolve conflict, tuân thủ đúng thứ tự ưu tiên sau:
 3. **Nhận nâng cấp upstream** ở những file anh **chỉ rename** (không có logic riêng) — đó đúng là mục đích "pull new version".
 4. **Bỏ import của dependency đã bị gỡ** (ví dụ `cache2k` đã bị upstream remove → import `org.cache2k.*` phải xoá, nếu không sẽ fail build).
 5. Trước khi resolve một khối conflict, **verify symbol còn tồn tại** sau merge (method/field/constant) để tránh build gãy âm thầm — vì auto-merge có thể xoá định nghĩa mà code phía HEAD vẫn gọi.
+6. **Java toolchain phải ≤ JVM của consumer.** App **SimpMusic** dùng lib này build bằng **JVM 21**.
+   Upstream hay nâng JDK đột ngột (v5.1.1 nhảy Java 8 → 25 qua commit `1cce4d0c`): bytecode Java 25
+   (class major 69) khiến SimpMusic (major 65) **không nạp được** → `UnsupportedClassVersionError` / dex fail.
+   Mỗi lần merge PHẢI check `build.gradle` (`JavaLanguageVersion.of(...)`) + `jitpack.yml` (`openjdk...`)
+   và **giữ ở Java 17**. SimpMusic chỉ consume artifact qua JitPack nên chỉ bytecode target ảnh hưởng;
+   Gradle wrapper version không ảnh hưởng consumer (giữ `9.5.1` ok vì chạy được với JDK 17).
 
 ### Feature riêng của fork cần bảo vệ
 - **WEB_REMIX client** (YouTube Music) để lấy Premium audio itag 141 (AAC 256kbps) và 774 (Opus 256kbps).
@@ -34,6 +40,8 @@ Khi resolve conflict, tuân thủ đúng thứ tự ưu tiên sau:
 - Channel tab (`YoutubeChannelTabExtractor`, `YoutubeChannelTabLinkHandlerFactory`):
   **nhận nâng cấp upstream** (channel tab sorting #62 + channel search #65), bỏ bản cũ dùng `YoutubeFilters`.
 - `localization` trong `onFetchPage`: theo upstream `new Localization("en")`.
+- **Java toolchain hạ `25` → `17`** (`build.gradle` `JavaLanguageVersion.of(17)` + `jitpack.yml` `openjdk17`)
+  để SimpMusic (JVM 21) nạp được bytecode. Gradle giữ `9.5.1`. Bump version fork → `v6.0.1`.
 
 ## Quy trình làm việc
 
