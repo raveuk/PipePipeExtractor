@@ -12,7 +12,7 @@ allprojects {
         options.encoding = 'UTF-8'
     }
 
-    version 'v6.0.0'
+    version 'v6.0.1'
     group 'dev.maxrave'
 
     repositories {
