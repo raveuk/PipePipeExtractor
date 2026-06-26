@@ -5,6 +5,8 @@ import java.util.regex.Pattern;
 
 import dev.maxrave.pipepipe.extractor.NewPipe;
 import dev.maxrave.pipepipe.extractor.downloader.Downloader;
+import dev.maxrave.pipepipe.extractor.downloader.Request;
+import dev.maxrave.pipepipe.extractor.downloader.Response;
 import dev.maxrave.pipepipe.extractor.exceptions.ParsingException;
 import dev.maxrave.pipepipe.extractor.exceptions.ReCaptchaException;
 import dev.maxrave.pipepipe.extractor.linkhandler.LinkHandlerFactory;
@@ -25,7 +27,14 @@ public class BilibiliStreamLinkHandlerFactory extends LinkHandlerFactory {
     public String getId(String url) throws ParsingException {
         if (url.contains("b23.tv")) {
             try {
-                url = downloader.get("https://b23.wtf/api?full=" + url.split("://")[1] + "&status=200").responseBody().trim();
+                final Response response = downloader.execute(Request.newBuilder()
+                        .get(url)
+                        .followRedirects(false)
+                        .build());
+                url = response.getHeader("Location");
+                if (url == null) {
+                    throw new ParsingException("Could not resolve bilibili short link.");
+                }
             } catch (IOException | ReCaptchaException e) {
                 throw new RuntimeException(e);
             }

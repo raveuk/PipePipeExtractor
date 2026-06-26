@@ -58,7 +58,6 @@ public final class VideoStream extends Stream {
     /**
      * Class to build {@link VideoStream} objects.
      */
-    @SuppressWarnings("checkstyle:hiddenField")
     public static final class Builder {
         private String id;
         private String content;
@@ -72,6 +71,14 @@ public final class VideoStream extends Stream {
         private Boolean isVideoOnly;
         private String resolution;
         private String codec;
+        private int bitrate;
+        private int initStart;
+        private int initEnd;
+        private int indexStart;
+        private int indexEnd;
+        private int width;
+        private int height;
+        private int fps;
         @Nullable
         private ItagItem itagItem;
         @Nullable
@@ -241,6 +248,46 @@ public final class VideoStream extends Stream {
             return this;
         }
 
+        public Builder setBitrate(int bitrate) {
+            this.bitrate = bitrate;
+            return this;
+        }
+
+        public Builder setInitStart(int initStart) {
+            this.initStart = initStart;
+            return this;
+        }
+
+        public Builder setInitEnd(int initEnd) {
+            this.initEnd = initEnd;
+            return this;
+        }
+
+        public Builder setIndexStart(int indexStart) {
+            this.indexStart = indexStart;
+            return this;
+        }
+
+        public Builder setIndexEnd(int indexEnd) {
+            this.indexEnd = indexEnd;
+            return this;
+        }
+
+        public Builder setWidth(int width) {
+            this.width = width;
+            return this;
+        }
+
+        public Builder setHeight(int height) {
+            this.height = height;
+            return this;
+        }
+
+        public Builder setFps(int fps) {
+            this.fps = fps;
+            return this;
+        }
+
         public Builder setAudioTrackId(@Nullable final String audioTrackId) {
             this.audioTrackId = audioTrackId;
             return this;
@@ -303,6 +350,7 @@ public final class VideoStream extends Stream {
             }
 
             return new VideoStream(id, content, isUrl, mediaFormat, deliveryMethod, resolution, codec,
+                    bitrate, initStart, initEnd, indexStart, indexEnd, width, height, fps,
                     isVideoOnly, manifestUrl, itagItem, audioTrackId, audioTrackName, audioLocale);
         }
     }
@@ -324,7 +372,6 @@ public final class VideoStream extends Stream {
      * @param manifestUrl    the URL of the manifest this stream comes from (if applicable,
      *                       otherwise null)
      */
-    @SuppressWarnings("checkstyle:ParameterNumber")
     private VideoStream(@Nonnull final String id,
                         @Nonnull final String content,
                         final boolean isUrl,
@@ -332,6 +379,14 @@ public final class VideoStream extends Stream {
                         @Nonnull final DeliveryMethod deliveryMethod,
                         @Nonnull final String resolution,
                         String codec,
+                        final int bitrate,
+                        final int initStart,
+                        final int initEnd,
+                        final int indexStart,
+                        final int indexEnd,
+                        final int width,
+                        final int height,
+                        final int fps,
                         final boolean isVideoOnly,
                         @Nullable final String manifestUrl,
                         @Nullable final ItagItem itagItem,
@@ -355,6 +410,24 @@ public final class VideoStream extends Stream {
         }
         if (codec != null) {
             this.codec = codec;
+        }
+        if (bitrate != 0) {
+            this.bitrate = bitrate;
+        }
+        if (initEnd != 0 || indexEnd != 0) {
+            this.initStart = initStart;
+            this.initEnd = initEnd;
+            this.indexStart = indexStart;
+            this.indexEnd = indexEnd;
+        }
+        if (width != 0) {
+            this.width = width;
+        }
+        if (height != 0) {
+            this.height = height;
+        }
+        if (fps != 0) {
+            this.fps = fps;
         }
         this.resolution = resolution;
         this.isVideoOnly = isVideoOnly;

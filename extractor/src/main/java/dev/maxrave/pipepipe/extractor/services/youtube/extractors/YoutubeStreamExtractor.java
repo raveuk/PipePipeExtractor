@@ -787,6 +787,11 @@ public class YoutubeStreamExtractor extends StreamExtractor {
      * This method collects all audio, video, and video-only streams,
      * then performs batch deobfuscation in one request.
      */
+    // TEMP (deep SABR testing): route every video through the real SABR pipeline (via
+    // serverAbrStreamingUrl). Set false for production. With it false, SABR only fills the
+    // SABR-only/no-HLS gap that upstream otherwise throws ContentNotSupportedException on.
+    // Controlled by the Force SABR advanced preference on the client side.
+
     private void ensureStreamsAreCached() throws ExtractionException {
         if (streamsCached) {
             return;
@@ -794,6 +799,16 @@ public class YoutubeStreamExtractor extends StreamExtractor {
 
         assertPageFetched();
         final String videoId = getId();
+
+        // SABR-only responses carry no per-format URLs: build session-based SABR streams instead
+        // of the classic URL/DASH/HLS path. The client drives a YoutubeSabrSession from these.
+        if (streamType != StreamType.LIVE_STREAM
+                && (NewPipe.isForceSabr()
+                    || (isSabrOnlyResponse() && getHlsManifestUrlFromStreamingData().isEmpty()))) {
+            buildSabrStreams();
+            streamsCached = true;
+            return;
+        }
 
         // Collect all ItagInfo objects from all stream types
         final List<ItagInfo> allItagInfos = new ArrayList<>();
@@ -877,6 +892,146 @@ public class YoutubeStreamExtractor extends StreamExtractor {
         } catch (final Exception e) {
             throw new ParsingException("Could not get streams", e);
         }
+    }
+
+    /**
+     * Build session-based SABR streams from a SABR-only response.
+     *
+     * <p>SABR adaptiveFormats carry no per-format URL: each stream is marked with
+     * {@link DeliveryMethod#SABR}, its {@code content} is the serverAbrStreamingUrl (for reference),
+     * and {@code isUrl} is false. The client drives a {@code YoutubeSabrSession} from the videoId and
+     * the selected itag to fetch media.</p>
+     */
+    private void buildSabrStreams() {
+        cachedAudioStreams = new ArrayList<>();
+        cachedVideoStreams = new ArrayList<>();
+        cachedVideoOnlyStreams = new ArrayList<>();
+
+        final JsonObject streamingData = getSabrStreamingData();
+        if (streamingData == null) {
+            return;
+        }
+        final String serverAbrStreamingUrl =
+                streamingData.getString("serverAbrStreamingUrl", EMPTY_STRING);
+        final JsonArray adaptiveFormats = streamingData.getArray(ADAPTIVE_FORMATS);
+        if (adaptiveFormats == null) {
+            return;
+        }
+
+        for (int i = 0; i < adaptiveFormats.size(); i++) {
+            final JsonObject formatData = adaptiveFormats.getObject(i);
+            try {
+                final ItagItem itagItem = ItagItem.getItag(formatData.getInt("itag"));
+                fillSabrItagItem(itagItem, formatData);
+                final String id = String.valueOf(itagItem.id);
+
+                if (itagItem.itagType == ItagItem.ItagType.AUDIO) {
+                    final AudioStream.Builder builder = new AudioStream.Builder()
+                            .setContent(serverAbrStreamingUrl, false)
+                            .setMediaFormat(itagItem.getMediaFormat())
+                            .setAverageBitrate(itagItem.getAverageBitrate())
+                            .setItagItem(itagItem)
+                            .setDeliveryMethod(DeliveryMethod.SABR);
+                    // Multi-track audio: the same itag is served once per language. Carry the track
+                    // info so the player can show a language selector, and key the id on (itag,
+                    // track) so the languages aren't collapsed into one by the dedup below.
+                    String streamId = id;
+                    if (formatData.has("audioTrack")) {
+                        final JsonObject audioTrack = formatData.getObject("audioTrack");
+                        if (audioTrack.has("id")) {
+                            final String trackId = audioTrack.getString("id");
+                            final String displayName = audioTrack.getString("displayName");
+                            final String langPart = trackId.split("\\.")[0];
+                            final boolean isOriginal = displayName != null
+                                    && (displayName.contains("original")
+                                        || displayName.contains("yokuqala"));
+                            builder.setAudioTrackId(trackId)
+                                    .setAudioTrackName(displayName != null ? displayName
+                                            : (isOriginal ? langPart + " (original)" : langPart))
+                                    .setAudioLocale(langPart.split("-")[0]);
+                            streamId = id + "-" + trackId;
+                        }
+                    }
+                    final String audioStreamId = streamId;
+                    final AudioStream stream = builder.setId(audioStreamId).build();
+                    // Dedup by id (itag, or itag+track when multi-track), not Stream.equalStats: all
+                    // SABR formats share the same MediaFormat/delivery, so equalStats would collapse
+                    // every bitrate/codec to one.
+                    if (cachedAudioStreams.stream().noneMatch(s -> audioStreamId.equals(s.getId()))) {
+                        cachedAudioStreams.add(stream);
+                    }
+                } else if (itagItem.itagType == ItagItem.ItagType.VIDEO_ONLY) {
+                    final String resolution = itagItem.getResolutionString();
+                    final VideoStream stream = new VideoStream.Builder()
+                            .setId(id)
+                            .setContent(serverAbrStreamingUrl, false)
+                            .setMediaFormat(itagItem.getMediaFormat())
+                            .setIsVideoOnly(true)
+                            .setItagItem(itagItem)
+                            .setResolution(resolution != null ? resolution : EMPTY_STRING)
+                            .setDeliveryMethod(DeliveryMethod.SABR)
+                            .build();
+                    if (cachedVideoOnlyStreams.stream().noneMatch(s -> id.equals(s.getId()))) {
+                        cachedVideoOnlyStreams.add(stream);
+                    }
+                }
+            } catch (final Exception e) {
+                // Skip unknown itags or malformed formats; do not fail the whole extraction.
+            }
+        }
+
+        Collections.sort(cachedAudioStreams,
+                Comparator.comparingInt(AudioStream::getBitrate).reversed());
+    }
+
+    @Nullable
+    private JsonObject getSabrStreamingData() {
+        for (final JsonObject streamingData : Arrays.asList(
+                webStreamingData, safariStreamingData, androidStreamingData,
+                tvHtml5SimplyEmbedStreamingData)) {
+            if (streamingData != null
+                    && streamingData.getArray(ADAPTIVE_FORMATS) != null
+                    && !streamingData.getArray(ADAPTIVE_FORMATS).isEmpty()) {
+                return streamingData;
+            }
+        }
+        return null;
+    }
+
+    private static void fillSabrItagItem(@Nonnull final ItagItem itagItem,
+                                         @Nonnull final JsonObject formatData) {
+        final String mimeType = formatData.getString("mimeType", EMPTY_STRING);
+        final String codec = mimeType.contains("codecs") ? mimeType.split("\"")[1] : EMPTY_STRING;
+
+        itagItem.setBitrate(formatData.getInt("bitrate"));
+        itagItem.setWidth(formatData.getInt("width"));
+        itagItem.setHeight(formatData.getInt("height"));
+        if (formatData.has("initRange")) {
+            final JsonObject initRange = formatData.getObject("initRange");
+            itagItem.setInitStart(Integer.parseInt(initRange.getString("start", "-1")));
+            itagItem.setInitEnd(Integer.parseInt(initRange.getString("end", "-1")));
+        }
+        if (formatData.has("indexRange")) {
+            final JsonObject indexRange = formatData.getObject("indexRange");
+            itagItem.setIndexStart(Integer.parseInt(indexRange.getString("start", "-1")));
+            itagItem.setIndexEnd(Integer.parseInt(indexRange.getString("end", "-1")));
+        }
+        itagItem.setQuality(formatData.getString("quality"));
+        itagItem.setCodec(codec);
+        final int fps = formatData.getInt("fps", -1);
+        if (fps != -1) {
+            itagItem.setFps(fps);
+        }
+        if (itagItem.itagType == ItagItem.ItagType.AUDIO) {
+            if (formatData.has("audioSampleRate")) {
+                itagItem.setSampleRate(Integer.parseInt(formatData.getString("audioSampleRate")));
+            }
+            itagItem.setAudioChannels(formatData.getInt("audioChannels", 2));
+        }
+        itagItem.setContentLength(Long.parseLong(formatData.getString("contentLength",
+                String.valueOf(CONTENT_LENGTH_UNKNOWN))));
+        itagItem.setApproxDurationMs(Long.parseLong(formatData.getString("approxDurationMs",
+                String.valueOf(APPROX_DURATION_MS_UNKNOWN))));
     }
 
     private void tryExtractHlsStreams(final String videoId) throws ExtractionException {
@@ -1152,6 +1307,10 @@ public class YoutubeStreamExtractor extends StreamExtractor {
         // TODO: use this to apply auto translation to different language from a source language
         // final JsonArray autoCaptionsArray = renderer.getArray("translationLanguages");
 
+        String autoTranslatedSubtitlesLanguage =
+                ServiceList.YouTube.getAutoTranslatedSubtitlesLanguage();
+        boolean hasFoundAutoTranslatedSubtitlesLanguage = false;
+        SubtitlesStream translatableSubtitle = null;
         boolean hasDuplicateEntries = false;
 
         for (int i = 0; i < captionsArray.size(); i++) {
@@ -1180,6 +1339,29 @@ public class YoutubeStreamExtractor extends StreamExtractor {
                         .setAutoGenerated(isAutoGenerated)
                         .build());
 
+                hasFoundAutoTranslatedSubtitlesLanguage = hasFoundAutoTranslatedSubtitlesLanguage
+                        || languageCode.equals(autoTranslatedSubtitlesLanguage);
+                if (translatableSubtitle == null) {
+                    translatableSubtitle = subtitlesToReturn.get(subtitlesToReturn.size() - 1);
+                }
+            }
+        }
+
+        if (translatableSubtitle != null
+                && !"original".equals(autoTranslatedSubtitlesLanguage)
+                && autoTranslatedSubtitlesLanguage != null
+                && !hasFoundAutoTranslatedSubtitlesLanguage
+                && ServiceList.YouTube.getShowAutoTranslatedSubtitles()) {
+            if (!hasDuplicateEntries) {
+                String autoTranslatedContent = SubtitleDeduplicator.getValidSubtitleContent(translatableSubtitle.getContent() + "&tlang=" + autoTranslatedSubtitlesLanguage);
+                if(autoTranslatedContent != null) {
+                    subtitlesToReturn.add(new SubtitlesStream.Builder()
+                            .setContent(autoTranslatedContent, false)
+                            .setMediaFormat(format)
+                            .setLanguageCode(autoTranslatedSubtitlesLanguage)
+                            .setAutoGenerated(false)
+                            .build());
+                }
             }
         }
 
@@ -1336,7 +1518,7 @@ public class YoutubeStreamExtractor extends StreamExtractor {
         }
 
         final byte[] body = JsonWriter.string(
-                prepareDesktopJsonBuilder(localization, contentCountry)
+                prepareDesktopJsonBuilder(getExtractorLocalization(), contentCountry)
                         .value(VIDEO_ID, videoId)
                         .value(CONTENT_CHECK_OK, true)
                         .value(RACY_CHECK_OK, true)
@@ -1385,9 +1567,23 @@ public class YoutubeStreamExtractor extends StreamExtractor {
             }
         } while (TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - startTime) <= ServiceList.YouTube.getLoadingTimeout());
 
+        // Anonymous fallback (ported from upstream): when not logged in and AndroidVR returned no
+        // streaming data, try the Safari (web) client once. The logged-in path (Safari + WebRemix)
+        // is untouched, so WebRemix is still only ever called when logged in.
+        if (StringUtils.isBlank(ServiceList.YouTube.getTokens()) && androidStreamingData == null) {
+            safariCall = fetchSafariJsonPlayer(contentCountry, localization, videoId);
+            startTime = System.nanoTime();
+            do {
+                if (safariCall.isFinished()) {
+                    break;
+                }
+            } while (TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - startTime) <= ServiceList.YouTube.getLoadingTimeout());
+        }
+
         final boolean missingStreamingData;
         if (StringUtils.isBlank(ServiceList.YouTube.getTokens())) {
-            missingStreamingData = androidStreamingData == null;
+            // AndroidVR or the Safari anonymous fallback providing data is enough
+            missingStreamingData = androidStreamingData == null && safariStreamingData == null;
         } else {
             // Either Safari or WebRemix providing streaming data is enough
             missingStreamingData = safariStreamingData == null
@@ -1406,18 +1602,16 @@ public class YoutubeStreamExtractor extends StreamExtractor {
             throw new ExtractionException("Error occurs when fetching the page. Try increase the loading timeout in Settings.");
         }
 
-        // Check playability status from the actual stream data source
-        if (playerResponse != null) {
-            checkPlayabilityStatus(playerResponse.getObject("playabilityStatus"), videoId);
-            setStreamType();
-        }
-
-        if (streamType != StreamType.LIVE_STREAM && isSabrOnlyResponse()
-                && getHlsManifestUrlFromStreamingData().isEmpty()) {
-            throw new ContentNotSupportedException(
-                    "YouTube returned SABR-only streaming data without usable stream URLs. "
+        if (playerResponse == null) {
+            throw new ContentNotSupportedException("YouTube returned SABR-only streaming data without usable stream URLs. "
                     + "Try logging in to get HLS fallback streams.");
         }
+
+        checkPlayabilityStatus(playerResponse.getObject("playabilityStatus"), videoId);
+        setStreamType();
+
+        // SABR-only responses are no longer a hard failure: ensureStreamsAreCached() builds
+        // session-based SABR streams (DeliveryMethod.SABR) from the adaptiveFormats instead.
     }
 
     private boolean isSabrOnlyResponse() {
