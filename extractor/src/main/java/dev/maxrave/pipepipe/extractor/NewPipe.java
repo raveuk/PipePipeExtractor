@@ -45,7 +45,9 @@ public final class NewPipe {
     private static Downloader downloader;
     private static Localization preferredLocalization;
     private static ContentCountry preferredContentCountry;
-    private static boolean forceSabr;
+    private static String youtubePlayerClient = "web_safari";
+    @Nullable
+    private static WebViewAvailabilityChecker webViewAvailabilityChecker;
 
     private NewPipe() {
 
@@ -162,12 +164,31 @@ public final class NewPipe {
         NewPipe.preferredContentCountry = preferredContentCountry;
     }
 
-    public static boolean isForceSabr() {
-        return forceSabr;
+    public static String getYoutubePlayerClient() {
+        return youtubePlayerClient;
     }
 
-    public static void setForceSabr(final boolean forceSabr) {
-        NewPipe.forceSabr = forceSabr;
+    public static void setYoutubePlayerClient(final String youtubePlayerClient) {
+        if ("mweb".equals(youtubePlayerClient)
+                || "web_safari".equals(youtubePlayerClient)
+                || "android_vr".equals(youtubePlayerClient)
+                || "tv_downgraded".equals(youtubePlayerClient)) {
+            NewPipe.youtubePlayerClient = youtubePlayerClient;
+        } else {
+            NewPipe.youtubePlayerClient = "web_safari";
+        }
+    }
+
+    public static void setWebViewAvailabilityChecker(
+            @Nullable final WebViewAvailabilityChecker checker) {
+        webViewAvailabilityChecker = checker;
+    }
+
+    public static void checkWebViewAvailable() throws ExtractionException {
+        final WebViewAvailabilityChecker checker = webViewAvailabilityChecker;
+        if (checker != null) {
+            checker.checkWebViewAvailable();
+        }
     }
 
     public static void trustEveryone() {

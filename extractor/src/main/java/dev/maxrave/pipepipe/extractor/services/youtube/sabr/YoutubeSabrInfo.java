@@ -2,10 +2,13 @@ package dev.maxrave.pipepipe.extractor.services.youtube.sabr;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+import java.io.Serializable;
 import java.util.Collections;
 import java.util.List;
 
-public final class YoutubeSabrInfo {
+public final class YoutubeSabrInfo implements Serializable {
+    private static final long serialVersionUID = 1L;
+
     @Nonnull
     private final YoutubeSabrClientProfile profile;
     @Nonnull
@@ -105,14 +108,14 @@ public final class YoutubeSabrInfo {
     }
 
     @Nullable
-    public YoutubeSabrFormat findBestVideoFormat() {
-        YoutubeSabrFormat best = null;
+    public YoutubeSabrFormat findLowestVideoFormat() {
+        YoutubeSabrFormat lowest = null;
         for (final YoutubeSabrFormat format : formats) {
-            if (format.isVideo() && (best == null || format.getHeight() > best.getHeight())) {
-                best = format;
+            if (format.isVideo() && (lowest == null || format.getHeight() < lowest.getHeight())) {
+                lowest = format;
             }
         }
-        return best;
+        return lowest;
     }
 
     @Nullable

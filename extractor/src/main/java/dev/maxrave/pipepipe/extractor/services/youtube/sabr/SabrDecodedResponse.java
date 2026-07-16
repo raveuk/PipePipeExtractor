@@ -9,7 +9,11 @@ import java.util.List;
 import java.util.Map;
 
 public final class SabrDecodedResponse {
+    private static final int MAX_MALFORMED_PARTS = 16;
+    private static final int MAX_MALFORMED_MESSAGE_CHARS = 256;
     private final List<UmpPart> parts = new ArrayList<>();
+    private final List<String> partSummaries = new ArrayList<>();
+    private final List<String> wireFieldSummaries = new ArrayList<>();
     private final List<SabrFormatInitializationMetadata> formatInitializationMetadata =
             new ArrayList<>();
     private final List<SabrMediaHeader> mediaHeaders = new ArrayList<>();
@@ -20,6 +24,7 @@ public final class SabrDecodedResponse {
     private final Map<Integer, Long> mediaBytesByHeaderId = new LinkedHashMap<>();
     private final List<Integer> mediaEndHeaderIds = new ArrayList<>();
     private final List<Integer> unknownPartTypes = new ArrayList<>();
+    private final List<String> malformedParts = new ArrayList<>();
     private final Map<Integer, List<String>> genericPartDescriptions = new LinkedHashMap<>();
     @Nullable
     private String redirectUrl;
@@ -60,10 +65,51 @@ public final class SabrDecodedResponse {
 
     void addPart(@Nonnull final UmpPart part) {
         parts.add(part);
+        addPartSummary(partSummaries, part.getType(), part.getSize());
+    }
+
+    void setPartSummaries(@Nonnull final List<String> summaries) {
+        partSummaries.clear();
+        partSummaries.addAll(summaries);
+    }
+
+    static void addPartSummary(@Nonnull final List<String> summaries,
+                               final int type,
+                               final int size) {
+        final String value = type + ":" + size;
+        if (summaries.isEmpty()) {
+            summaries.add(value);
+            return;
+        }
+        final int lastIndex = summaries.size() - 1;
+        final String last = summaries.get(lastIndex);
+        if (last.equals(value)) {
+            summaries.set(lastIndex, value + "x2");
+        } else if (last.startsWith(value + 'x')) {
+            summaries.set(lastIndex, value
+                    + 'x' + (Integer.parseInt(last.substring(value.length() + 1)) + 1));
+        } else {
+            summaries.add(value);
+        }
     }
 
     void addUnknownPartType(final int type) {
         unknownPartTypes.add(type);
+    }
+
+    void addMalformedPart(final int type, final int size,
+                          @Nonnull final SabrProtocolException error) {
+        if (malformedParts.size() >= MAX_MALFORMED_PARTS) {
+            return;
+        }
+        final String message = String.valueOf(error.getMessage());
+        malformedParts.add(type + ":" + size + ":" + (message.length()
+                > MAX_MALFORMED_MESSAGE_CHARS
+                ? message.substring(0, MAX_MALFORMED_MESSAGE_CHARS) : message));
+    }
+
+    void addWireFieldSummary(final int type, @Nonnull final String summary) {
+        wireFieldSummaries.add(type + "={" + summary + '}');
     }
 
     void addGenericPartDescription(final int type, @Nonnull final String description) {
@@ -276,6 +322,11 @@ public final class SabrDecodedResponse {
     }
 
     @Nonnull
+    public List<String> getMalformedParts() {
+        return Collections.unmodifiableList(malformedParts);
+    }
+
+    @Nonnull
     public Map<Integer, List<String>> getGenericPartDescriptions() {
         final Map<Integer, List<String>> copy = new LinkedHashMap<>();
         for (final Map.Entry<Integer, List<String>> entry : genericPartDescriptions.entrySet()) {
@@ -394,6 +445,35 @@ public final class SabrDecodedResponse {
 
     public boolean isProtectedNoMediaResponse() {
         return isNoMediaResponse() && streamProtectionStatus >= 3;
+    }
+
+    public boolean isProtectionBoundaryNoMediaResponse() {
+        return isNoMediaResponse() && streamProtectionStatus >= 2;
+    }
+
+    @Nonnull
+    public String summarizeForDiagnostics() {
+        final List<String> initialization = new ArrayList<>();
+        for (final SabrFormatInitializationMetadata metadata : formatInitializationMetadata) {
+            initialization.add(metadata.summarize());
+        }
+        final List<String> headers = new ArrayList<>();
+        for (final SabrMediaHeader header : mediaHeaders) {
+            headers.add(header.summarize());
+        }
+        return "parts=" + partSummaries
+                + ", wireFields=" + wireFieldSummaries
+                + ", controls=" + genericPartDescriptions
+                + ", initialization=" + initialization
+                + ", mediaHeaders=" + headers
+                + ", mediaBytes=" + mediaBytesByHeaderId
+                + ", mediaEnds=" + mediaEndHeaderIds
+                + ", integrity=" + getIntegrityIssues()
+                + ", malformedParts=" + malformedParts
+                + ", unknownParts=" + unknownPartTypes
+                + ", protection=" + streamProtectionStatus + '/' + streamProtectionMaxRetries
+                + ", backoffMs=" + backoffTimeMs
+                + ", reload=" + reloadRequested;
     }
 
     @Nonnull

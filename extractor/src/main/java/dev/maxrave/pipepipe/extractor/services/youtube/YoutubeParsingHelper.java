@@ -195,8 +195,8 @@ YoutubeParsingHelper {
      */
     private static final String TVHTML5_SIMPLY_EMBED_CLIENT_VERSION = "7.20250923.13.00";
     private static final String WEB_CLIENT_VERSION = "2.20241126.01.00";
-    private static final String SAFARI_CLIENT_VERSION = "2.20260114.08.00";
-    static final String SAFARI_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15,gzip(gfe)";
+    public static final String WEB_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36,gzip(gfe)";
+    public static final String MWEB_USER_AGENT = "Mozilla/5.0 (iPad; CPU OS 16_7_10 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1,gzip(gfe)";
 
     private static String clientVersion;
 
@@ -1510,9 +1510,11 @@ YoutubeParsingHelper {
     }
 
     @Nonnull
-    public static JsonBuilder<JsonObject> prepareSafariJsonBuilder(
+    public static JsonBuilder<JsonObject> prepareJsonPlayerBuilder(
             @Nonnull final Localization localization,
-            @Nonnull final ContentCountry contentCountry)
+            @Nonnull final ContentCountry contentCountry,
+            @Nonnull final String clientName,
+            @Nonnull final String userAgent)
             throws IOException, ExtractionException {
         return JsonObject.builder()
                 .object("context")
@@ -1521,23 +1523,26 @@ YoutubeParsingHelper {
                         .value("timeZone", "UTC")
                         .value("hl", localization.getLocalizationCode())
                         .value("gl", contentCountry.getCountryCode())
-                        .value("userAgent", SAFARI_USER_AGENT)
-                        .value("clientName", "WEB")
+                        .value("userAgent", userAgent)
+                        .value("clientName", clientName)
                         .value("clientVersion", getClientVersion())
                     .end()
                 .end();
     }
 
     @Nonnull
-    public static byte[] createSafariPlayerBody(
+    public static byte[] createJsonPlayerBody(
             @Nonnull final Localization localization,
             @Nonnull final ContentCountry contentCountry,
             @Nonnull final String videoId,
             @Nonnull final Integer sts,
-            @Nonnull final String contentPlaybackNonce)
+            @Nonnull final String contentPlaybackNonce,
+            @Nonnull final String clientName,
+            @Nonnull final String userAgent)
             throws IOException, ExtractionException {
         return JsonWriter.string(
-                        prepareSafariJsonBuilder(localization, contentCountry)
+                        prepareJsonPlayerBuilder(localization, contentCountry,
+                                clientName, userAgent)
                                 .object("playbackContext")
                                     .object("contentPlaybackContext")
                                         .value("html5Preference", "HTML5_PREF_WANTS")
@@ -1552,20 +1557,40 @@ YoutubeParsingHelper {
                 .getBytes(StandardCharsets.UTF_8);
     }
 
-    public static CancellableCall getSafariPostResponseAsync(final String endpoint,
+    public static CancellableCall getJsonPlayerResponseAsync(final String endpoint,
                                                              final byte[] body,
                                                              final Localization localization,
+                                                             final String clientId,
+                                                             final String userAgent,
                                                              final Downloader.AsyncCallback callback)
             throws IOException, ExtractionException {
         final Map<String, List<String>> headers = new HashMap<>();
         headers.put("Content-Type", singletonList("application/json"));
-        headers.put("User-Agent", singletonList(SAFARI_USER_AGENT));
-        headers.put("X-YouTube-Client-Name", singletonList("1"));
+        headers.put("User-Agent", singletonList(userAgent));
+        headers.put("X-YouTube-Client-Name", singletonList(clientId));
         headers.put("X-Youtube-Client-Version", singletonList(getClientVersion()));
 
         addLoggedInHeaders(headers);
 
         return getDownloader().postAsync(YOUTUBEI_V1_URL + endpoint + "?" + DISABLE_PRETTY_PRINT_PARAMETER, headers, body, localization, callback);
+    }
+
+    public static CancellableCall getJsonPlayerResponseAsync(final String endpoint,
+                                                             final byte[] body,
+                                                             final Localization localization,
+                                                             final String clientId,
+                                                             final String clientVersion,
+                                                             final String userAgent,
+                                                             final Downloader.AsyncCallback callback)
+            throws IOException, ExtractionException {
+        final Map<String, List<String>> headers = new HashMap<>();
+        headers.put("Content-Type", singletonList("application/json"));
+        headers.put("User-Agent", singletonList(userAgent));
+        headers.put("X-YouTube-Client-Name", singletonList(clientId));
+        headers.put("X-Youtube-Client-Version", singletonList(clientVersion));
+        addLoggedInHeaders(headers);
+        return getDownloader().postAsync(YOUTUBEI_V1_URL + endpoint + "?"
+                + DISABLE_PRETTY_PRINT_PARAMETER, headers, body, localization, callback);
     }
 
     /*//////////////////////////////////////////////////////////////////////////
@@ -1673,6 +1698,7 @@ YoutubeParsingHelper {
             @Nonnull final ContentCountry contentCountry,
             @Nonnull final String videoId,
             final YoutubeStreamExtractor streamExtractor) throws IOException, ExtractionException {
+        long stageStartedAt = System.nanoTime();
         final byte[] body = JsonWriter.string(
                         prepareDesktopJsonBuilder(localization, contentCountry)
                                 .value(VIDEO_ID, videoId)
@@ -1680,14 +1706,18 @@ YoutubeParsingHelper {
                                 .value(RACY_CHECK_OK, true)
                                 .done())
                 .getBytes(StandardCharsets.UTF_8);
+        logPerformance(videoId, "webPlayer.prepareBody", stageStartedAt);
         final String url = YOUTUBEI_V1_URL + "player" + "?" + DISABLE_PRETTY_PRINT_PARAMETER
                 + "&$fields=microformat,playabilityStatus,storyboards,videoDetails";
 
+        stageStartedAt = System.nanoTime();
         final Map<String, List<String>> headers = new HashMap<>();
         addYoutubeHeaders(headers);
         headers.put("Content-Type", singletonList("application/json"));
         addLoggedInHeaders(headers);
-        return getDownloader().postAsync(
+        logPerformance(videoId, "webPlayer.prepareHeaders", stageStartedAt);
+        stageStartedAt = System.nanoTime();
+        final CancellableCall call = getDownloader().postAsync(
                 url, headers, body, localization, new Downloader.AsyncCallback() {
                     @Override
                     public void onSuccess(Response response) throws ExtractionException {
@@ -1720,10 +1750,17 @@ YoutubeParsingHelper {
                            streamExtractor.watchDataCache.startAt = streamExtractor.getStartAt();
                         } catch (Exception e) {
                             e.printStackTrace();
-                            streamExtractor.errors.add(e);
+                            streamExtractor.addError(e);
                         }
                     }
+
+                    @Override
+                    public void onError(final Exception error) {
+                        streamExtractor.addError(error);
+                    }
                 });
+        logPerformance(videoId, "webPlayer.enqueue", stageStartedAt);
+        return call;
     }
 
     @Nonnull
@@ -2588,5 +2625,14 @@ YoutubeParsingHelper {
                 .end();
 
         return builder;
+    }
+
+    private static void logPerformance(@Nonnull final String videoId,
+                                       @Nonnull final String stage,
+                                       final long startedAtNanos) {
+        System.out.println("YT_PERF videoId=" + videoId + " stage=" + stage
+                + " durationMs="
+                + java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+                        System.nanoTime() - startedAtNanos));
     }
 }

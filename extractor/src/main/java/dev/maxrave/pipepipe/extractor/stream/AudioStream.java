@@ -23,6 +23,7 @@ package dev.maxrave.pipepipe.extractor.stream;
 import dev.maxrave.pipepipe.extractor.MediaFormat;
 import dev.maxrave.pipepipe.extractor.services.youtube.ItagItem;
 
+import java.io.Serializable;
 import java.util.Objects;
 
 import javax.annotation.Nonnull;
@@ -74,6 +75,9 @@ public final class AudioStream extends Stream {
         private String audioTrackId;
         private String audioTrackName;
         private String audioLocale;
+        private long availableAt = AVAILABLE_AT_UNKNOWN;
+        @Nullable
+        private Serializable deliveryMethodInfo;
         /**
          * Create a new {@link Builder} instance with its default values.
          */
@@ -257,6 +261,16 @@ public final class AudioStream extends Stream {
             return this;
         }
 
+        public Builder setAvailableAt(final long availableAt) {
+            this.availableAt = availableAt;
+            return this;
+        }
+
+        public Builder setDeliveryMethodInfo(@Nullable final Serializable deliveryMethodInfo) {
+            this.deliveryMethodInfo = deliveryMethodInfo;
+            return this;
+        }
+
         /**
          * Build an {@link AudioStream} using the builder's current values.
          *
@@ -291,7 +305,8 @@ public final class AudioStream extends Stream {
 
             return new AudioStream(id, content, isUrl, mediaFormat, deliveryMethod, averageBitrate, codec,
                     bitrate, initStart, initEnd, indexStart, indexEnd, manifestUrl, itagItem,
-                    quality, audioTrackId, audioTrackName, audioLocale);
+                    quality, audioTrackId, audioTrackName, audioLocale, availableAt,
+                    deliveryMethodInfo);
         }
     }
 
@@ -330,8 +345,11 @@ public final class AudioStream extends Stream {
                         @Nullable final ItagItem itagItem, String quality,
                         @Nullable final String audioTrackId,
                         @Nullable final String audioTrackName,
-                        @Nullable final String audioLocale) {
-        super(id, content, isUrl, format, deliveryMethod, manifestUrl);
+                        @Nullable final String audioLocale,
+                        final long availableAt,
+                        @Nullable final Serializable deliveryMethodInfo) {
+        super(id, content, isUrl, format, deliveryMethod, manifestUrl, availableAt,
+                deliveryMethodInfo);
         if (itagItem != null) {
             this.itagItem = itagItem;
             this.itag = itagItem.id;

@@ -68,7 +68,17 @@ public final class SabrResponseDecoder {
         for (final UmpPart part : parts) {
             final byte[] partData = part.getRawData();
             decoded.addPart(part);
-            switch (part.getType()) {
+            if (part.getType() != MEDIA && part.getType() != MEDIA_END) {
+                try {
+                    decoded.addWireFieldSummary(part.getType(),
+                            SabrProto.summarizeFields(partData));
+                } catch (final SabrProtocolException ignored) {
+                    decoded.addWireFieldSummary(part.getType(),
+                            "opaqueBytes=" + partData.length);
+                }
+            }
+            try {
+                switch (part.getType()) {
                 case ONESIE_HEADER:
                     final SabrOnesieHeader onesieHeader =
                             SabrOnesieHeader.decode(partData);
@@ -235,6 +245,14 @@ public final class SabrResponseDecoder {
                     decoded.addGenericPartDescription(part.getType(),
                             describeGenericMessage(partData));
                     break;
+                }
+            } catch (final SabrProtocolException e) {
+                // One malformed protobuf message must not discard valid MEDIA from the rest of the
+                // UMP response. Wire types 6/7 are invalid protobuf, and have been observed in a
+                // transient NEXT_REQUEST_POLICY response. Ignore only that part and retain a
+                // bounded diagnostic. MEDIA_HEADER corruption is still detected by the media
+                // integrity checks (media-without-header) and goes through bounded recovery.
+                decoded.addMalformedPart(part.getType(), part.getSize(), e);
             }
         }
         return decoded;

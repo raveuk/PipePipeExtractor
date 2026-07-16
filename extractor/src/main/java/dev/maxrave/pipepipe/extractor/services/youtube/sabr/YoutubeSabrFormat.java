@@ -3,12 +3,24 @@ package dev.maxrave.pipepipe.extractor.services.youtube.sabr;
 import com.grack.nanojson.JsonArray;
 import com.grack.nanojson.JsonObject;
 
+import dev.maxrave.pipepipe.extractor.exceptions.ParsingException;
+import dev.maxrave.pipepipe.extractor.services.youtube.YoutubeJavaScriptPlayerManager;
+
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+import java.io.Serializable;
+import java.io.UnsupportedEncodingException;
+import java.net.URLDecoder;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
-public final class YoutubeSabrFormat {
+public final class YoutubeSabrFormat implements Serializable {
+    private static final long serialVersionUID = 1L;
+
     private final int itag;
     private final long lastModified;
     @Nullable
@@ -30,6 +42,10 @@ public final class YoutubeSabrFormat {
     private final int bitrate;
     private final long contentLength;
     private final long approxDurationMs;
+    @Nullable
+    private final String initializationUrl;
+    private final long initRangeStart;
+    private final long initRangeEnd;
 
     private YoutubeSabrFormat(final int itag,
                               final long lastModified,
@@ -45,7 +61,10 @@ public final class YoutubeSabrFormat {
                               final int height,
                               final int bitrate,
                               final long contentLength,
-                              final long approxDurationMs) {
+                              final long approxDurationMs,
+                              @Nullable final String initializationUrl,
+                              final long initRangeStart,
+                              final long initRangeEnd) {
         this.itag = itag;
         this.lastModified = lastModified;
         this.xtags = xtags;
@@ -61,10 +80,15 @@ public final class YoutubeSabrFormat {
         this.bitrate = bitrate;
         this.contentLength = contentLength;
         this.approxDurationMs = approxDurationMs;
+        this.initializationUrl = initializationUrl;
+        this.initRangeStart = initRangeStart;
+        this.initRangeEnd = initRangeEnd;
     }
 
     @Nonnull
-    static List<YoutubeSabrFormat> fromAdaptiveFormats(@Nullable final JsonArray formats) {
+    static List<YoutubeSabrFormat> fromAdaptiveFormats(@Nonnull final String videoId,
+                                                       @Nullable final JsonArray formats)
+            throws ParsingException {
         final List<YoutubeSabrFormat> result = new ArrayList<>();
         if (formats == null) {
             return result;
@@ -72,15 +96,27 @@ public final class YoutubeSabrFormat {
         for (int i = 0; i < formats.size(); i++) {
             final JsonObject format = formats.getObject(i);
             if (format != null && format.has("itag")) {
-                result.add(fromJson(format));
+                result.add(fromJson(videoId, format));
             }
         }
         return result;
     }
 
     @Nonnull
-    private static YoutubeSabrFormat fromJson(@Nonnull final JsonObject format) {
+    private static YoutubeSabrFormat fromJson(@Nonnull final String videoId,
+                                              @Nonnull final JsonObject format)
+            throws ParsingException {
         final JsonObject audioTrack = format.getObject("audioTrack");
+        final JsonObject initRange = format.getObject("initRange");
+        final JsonObject indexRange = format.getObject("indexRange");
+        final long initRangeStart = initRange == null ? -1 : parseLong(initRange.get("start"));
+        long initRangeEnd = initRange == null ? -1 : parseLong(initRange.get("end"));
+        if (indexRange != null) {
+            final long indexRangeEnd = parseLong(indexRange.get("end"));
+            if (indexRangeEnd > initRangeEnd) {
+                initRangeEnd = indexRangeEnd;
+            }
+        }
         return new YoutubeSabrFormat(
                 format.getInt("itag"),
                 parseLong(format.get("lastModified")),
@@ -96,7 +132,68 @@ public final class YoutubeSabrFormat {
                 format.getInt("height", -1),
                 format.getInt("bitrate", -1),
                 parseLong(format.get("contentLength")),
-                parseLong(format.get("approxDurationMs")));
+                parseLong(format.get("approxDurationMs")),
+                decodeStreamingUrl(videoId, format),
+                initRangeStart,
+                initRangeEnd);
+    }
+
+    @Nullable
+    private static String decodeStreamingUrl(@Nonnull final String videoId,
+                                             @Nonnull final JsonObject format)
+            throws ParsingException {
+        String url = format.getString("url");
+        if ((url == null || url.isEmpty()) && format.has("signatureCipher")) {
+            final Map<String, String> cipher = parseQuery(format.getString("signatureCipher"));
+            url = cipher.get("url");
+            final String obfuscatedSignature = cipher.get("s");
+            if (url != null && obfuscatedSignature != null && !obfuscatedSignature.isEmpty()) {
+                final String signatureParameter = cipher.getOrDefault("sp", "signature");
+                final String signature = YoutubeJavaScriptPlayerManager
+                        .deobfuscateSignature(videoId, obfuscatedSignature);
+                final String separator = url.contains("?") ? "&" : "?";
+                url = url + separator + urlEncode(signatureParameter) + '='
+                        + urlEncode(signature);
+            }
+        }
+        return YoutubeSabrProbe.maybeDeobfuscateNParameter(videoId, url);
+    }
+
+    @Nonnull
+    private static Map<String, String> parseQuery(@Nullable final String value)
+            throws ParsingException {
+        final Map<String, String> params = new HashMap<>();
+        if (value == null || value.isEmpty()) {
+            return params;
+        }
+        final String[] parts = value.split("&");
+        for (final String part : parts) {
+            final int equals = part.indexOf('=');
+            if (equals <= 0) {
+                continue;
+            }
+            params.put(urlDecode(part.substring(0, equals)),
+                    urlDecode(part.substring(equals + 1)));
+        }
+        return params;
+    }
+
+    @Nonnull
+    private static String urlEncode(@Nonnull final String value) throws ParsingException {
+        try {
+            return URLEncoder.encode(value, StandardCharsets.UTF_8.name());
+        } catch (final UnsupportedEncodingException e) {
+            throw new ParsingException("Could not encode SABR signature cipher", e);
+        }
+    }
+
+    @Nonnull
+    private static String urlDecode(@Nonnull final String value) throws ParsingException {
+        try {
+            return URLDecoder.decode(value, StandardCharsets.UTF_8.name());
+        } catch (final UnsupportedEncodingException e) {
+            throw new ParsingException("Could not decode SABR signature cipher", e);
+        }
     }
 
     private static long parseLong(@Nullable final Object value) {
@@ -196,5 +293,18 @@ public final class YoutubeSabrFormat {
 
     public long getApproxDurationMs() {
         return approxDurationMs;
+    }
+
+    @Nullable
+    public String getInitializationUrl() {
+        return initializationUrl;
+    }
+
+    public long getInitRangeStart() {
+        return initRangeStart;
+    }
+
+    public long getInitRangeEnd() {
+        return initRangeEnd;
     }
 }

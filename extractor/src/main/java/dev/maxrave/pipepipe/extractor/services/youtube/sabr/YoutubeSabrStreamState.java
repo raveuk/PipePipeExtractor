@@ -11,6 +11,13 @@ import java.util.Map;
 import java.util.Set;
 
 public final class YoutubeSabrStreamState {
+    public static final int TRACK_MODE_VIDEO_AND_AUDIO =
+            YoutubeSabrRequestBuilder.ENABLED_TRACK_TYPES_VIDEO_AND_AUDIO;
+    public static final int TRACK_MODE_AUDIO_ONLY =
+            YoutubeSabrRequestBuilder.ENABLED_TRACK_TYPES_AUDIO_ONLY;
+    public static final int TRACK_MODE_VIDEO_ONLY =
+            YoutubeSabrRequestBuilder.ENABLED_TRACK_TYPES_VIDEO_ONLY;
+
     private final FormatProgress audio;
     private final FormatProgress video;
     private final Map<Integer, SabrContextUpdate> sabrContexts = new LinkedHashMap<>();
@@ -19,15 +26,17 @@ public final class YoutubeSabrStreamState {
     private byte[] playbackCookie;
     @Nullable
     private byte[] poToken;
+    @Nullable
+    private volatile SabrNextRequestPolicy nextRequestPolicy;
     private long playerTimeMsOverride = -1;
     private boolean audioFullyBuffered;
     private boolean videoFullyBuffered;
     private boolean audioLastOnlyRange;
     private boolean videoLastOnlyRange;
     private boolean lastOnlyRangesUseObservedTiming;
-    private int enabledTrackTypesBitfield = YoutubeSabrRequestBuilder.ENABLED_TRACK_TYPES_VIDEO_AND_AUDIO;
-    private boolean selectAudioFormat = true;
-    private boolean selectVideoFormat = true;
+    private volatile int enabledTrackTypesBitfield = YoutubeSabrRequestBuilder.ENABLED_TRACK_TYPES_VIDEO_AND_AUDIO;
+    private volatile boolean selectAudioFormat = true;
+    private volatile boolean selectVideoFormat = true;
     private boolean writeTopLevelPlayerTimeMs = true;
     private int clientViewportWidth = -1;
     private int clientViewportHeight = -1;
@@ -79,6 +88,9 @@ public final class YoutubeSabrStreamState {
     public boolean ingest(@Nonnull final SabrDecodedResponse response) {
         boolean progressed = false;
         final SabrNextRequestPolicy nextRequestPolicy = response.getNextRequestPolicy();
+        if (nextRequestPolicy != null) {
+            this.nextRequestPolicy = nextRequestPolicy;
+        }
         if (nextRequestPolicy != null && nextRequestPolicy.getRawPlaybackCookie() != null) {
             playbackCookie = nextRequestPolicy.getRawPlaybackCookie().clone();
         }
@@ -119,25 +131,40 @@ public final class YoutubeSabrStreamState {
         return progress != null && progress.observeSegment(segment);
     }
 
+    public boolean ingestInitializationData(@Nonnull final YoutubeSabrFormat format,
+                                            @Nonnull final byte[] data) {
+        final FormatProgress progress = findProgressForItag(format.getItag());
+        if (progress == null) {
+            return false;
+        }
+        progress.initReceived = true;
+        progress.observeInitializationData(data);
+        return true;
+    }
+
     @Nonnull
     public List<SabrBufferedRange> getBufferedRanges() {
         if (bufferedRangesOverride != null) {
             return new ArrayList<>(bufferedRangesOverride);
         }
         final List<SabrBufferedRange> ranges = new ArrayList<>();
-        if (audioFullyBuffered) {
-            ranges.add(SabrBufferedRange.full(audio.format));
-        } else {
-            audio.addBufferedRange(ranges, audioLastOnlyRange,
-                    lastOnlyRangesUseObservedTiming,
-                    bufferedRangeStartSegmentIndexOffset, bufferedRangeEndSegmentIndexOffset);
+        if (isAudioEnabled()) {
+            if (audioFullyBuffered) {
+                ranges.add(SabrBufferedRange.full(audio.format));
+            } else {
+                audio.addBufferedRange(ranges, audioLastOnlyRange,
+                        lastOnlyRangesUseObservedTiming,
+                        bufferedRangeStartSegmentIndexOffset, bufferedRangeEndSegmentIndexOffset);
+            }
         }
-        if (videoFullyBuffered) {
-            ranges.add(SabrBufferedRange.full(video.format));
-        } else {
-            video.addBufferedRange(ranges, videoLastOnlyRange,
-                    lastOnlyRangesUseObservedTiming,
-                    bufferedRangeStartSegmentIndexOffset, bufferedRangeEndSegmentIndexOffset);
+        if (isVideoEnabled()) {
+            if (videoFullyBuffered) {
+                ranges.add(SabrBufferedRange.full(video.format));
+            } else {
+                video.addBufferedRange(ranges, videoLastOnlyRange,
+                        lastOnlyRangesUseObservedTiming,
+                        bufferedRangeStartSegmentIndexOffset, bufferedRangeEndSegmentIndexOffset);
+            }
         }
         return ranges;
     }
@@ -156,9 +183,30 @@ public final class YoutubeSabrStreamState {
         return Math.max(audio.getBufferedEndMs(), video.getBufferedEndMs());
     }
 
+    long getRequestPlayerTimeMs() {
+        if (playerTimeMsOverride >= 0) {
+            return playerTimeMsOverride;
+        }
+        if ((isAudioEnabled() && !audio.initReceived)
+                || (isVideoEnabled() && !video.initReceived)) {
+            return 0;
+        }
+        return getPlayerTimeMs();
+    }
+
     /** buffered end (ms) of the slower track = how far we can actually play. the weakest link wins. */
     public long getMinBufferedEndMs() {
+        if (!isVideoEnabled()) {
+            return audio.getBufferedEndMs();
+        }
+        if (!isAudioEnabled()) {
+            return video.getBufferedEndMs();
+        }
         return Math.min(audio.getBufferedEndMs(), video.getBufferedEndMs());
+    }
+
+    public long getBufferedEndMs(@Nonnull final YoutubeSabrFormat format) {
+        return progressForItag(format.getItag()).getBufferedEndMs();
     }
 
     public void setPlayerTimeMs(final long playerTimeMs) {
@@ -167,6 +215,18 @@ public final class YoutubeSabrStreamState {
 
     public void clearPlayerTimeMsOverride() {
         playerTimeMsOverride = -1;
+    }
+
+    void clearPlaybackCookie() {
+        playbackCookie = null;
+    }
+
+    boolean isInitialized(@Nonnull final YoutubeSabrFormat format) {
+        return progressForItag(format.getItag()).initReceived;
+    }
+
+    void resetInitialization(@Nonnull final YoutubeSabrFormat format) {
+        progressForItag(format.getItag()).initReceived = false;
     }
 
     @Nullable
@@ -217,7 +277,8 @@ public final class YoutubeSabrStreamState {
     }
 
     public boolean isComplete() {
-        return audio.isComplete() && video.isComplete();
+        return (!isAudioEnabled() || audio.isComplete())
+                && (!isVideoEnabled() || video.isComplete());
     }
 
     /** True once the server has sent live metadata for this stream (foundation for live support). */
@@ -333,12 +394,47 @@ public final class YoutubeSabrStreamState {
         bufferedRangeEndSegmentIndexOffset = endSegmentIndexOffset;
     }
 
-    public void setRequestTrackMode(final int enabledTrackTypesBitfield,
-                                    final boolean selectAudioFormat,
-                                    final boolean selectVideoFormat) {
+    public synchronized void setRequestTrackMode(final int enabledTrackTypesBitfield,
+                                                 final boolean selectAudioFormat,
+                                                 final boolean selectVideoFormat) {
         this.enabledTrackTypesBitfield = enabledTrackTypesBitfield;
         this.selectAudioFormat = selectAudioFormat;
         this.selectVideoFormat = selectVideoFormat;
+    }
+
+    public void setActiveTrackTypes(final boolean videoActive, final boolean audioActive) {
+        if (audioActive && !videoActive) {
+            setRequestTrackMode(YoutubeSabrRequestBuilder.ENABLED_TRACK_TYPES_AUDIO_ONLY,
+                    true, false);
+        } else if (videoActive && !audioActive) {
+            setRequestTrackMode(YoutubeSabrRequestBuilder.ENABLED_TRACK_TYPES_VIDEO_ONLY,
+                    false, true);
+        } else if (videoActive) {
+            setRequestTrackMode(YoutubeSabrRequestBuilder.ENABLED_TRACK_TYPES_VIDEO_AND_AUDIO,
+                    true, true);
+        }
+    }
+
+    public void setAudioOnlyRequestMode() {
+        setRequestTrackMode(TRACK_MODE_AUDIO_ONLY, true, false);
+    }
+
+    public void setVideoOnlyRequestMode() {
+        setRequestTrackMode(TRACK_MODE_VIDEO_ONLY, false, true);
+    }
+
+    public void setVideoAndAudioRequestMode() {
+        setRequestTrackMode(TRACK_MODE_VIDEO_AND_AUDIO, true, true);
+    }
+
+    private boolean isAudioEnabled() {
+        return enabledTrackTypesBitfield
+                != YoutubeSabrRequestBuilder.ENABLED_TRACK_TYPES_VIDEO_ONLY;
+    }
+
+    private boolean isVideoEnabled() {
+        return enabledTrackTypesBitfield
+                != YoutubeSabrRequestBuilder.ENABLED_TRACK_TYPES_AUDIO_ONLY;
     }
 
     public void setClientViewport(final int clientViewportWidth,
@@ -359,8 +455,13 @@ public final class YoutubeSabrStreamState {
         this.bandwidthEstimate = bandwidthEstimate;
     }
 
-    long getBandwidthEstimate() {
+    public long getBandwidthEstimate() {
         return bandwidthEstimate;
+    }
+
+    @Nullable
+    public SabrNextRequestPolicy getNextRequestPolicy() {
+        return nextRequestPolicy;
     }
 
     public void setPlaybackRate(final float playbackRate) {
@@ -646,21 +747,62 @@ public final class YoutubeSabrStreamState {
             if (!segment.getHeader().isInitSegment() || metadata == null || segmentIndex != null) {
                 return false;
             }
-            final String mimeType = metadata.getMimeType();
+            return observeInitializationData(segment.getData());
+        }
+
+        private boolean observeInitializationData(@Nonnull final byte[] data) {
+            if (segmentIndex != null) {
+                return false;
+            }
+            final String mimeType = metadata == null ? format.getMimeType() : metadata.getMimeType();
             if (mimeType == null) {
                 return false;
             }
             try {
                 if (mimeType.contains("mp4")) {
-                    segmentIndex = SabrMp4SegmentIndexParser.parse(segment.getData(), metadata);
+                    segmentIndex = metadata == null
+                            ? SabrMp4SegmentIndexParser.parse(data, format)
+                            : SabrMp4SegmentIndexParser.parse(data, metadata);
                 } else if (mimeType.contains("webm")) {
-                    segmentIndex = SabrWebmSegmentIndexParser.parse(segment.getData(), metadata);
+                    segmentIndex = metadata == null
+                            ? SabrWebmSegmentIndexParser.parse(data, format)
+                            : SabrWebmSegmentIndexParser.parse(data, metadata);
                 } else {
                     return false;
                 }
+                observeSegmentIndex();
                 return true;
             } catch (final SabrProtocolException ignored) {
+                if (metadata == null) {
+                    return false;
+                }
+                try {
+                    if (mimeType.contains("mp4")) {
+                        segmentIndex = SabrMp4SegmentIndexParser.parse(data, format);
+                    } else if (mimeType.contains("webm")) {
+                        segmentIndex = SabrWebmSegmentIndexParser.parse(data, format);
+                    } else {
+                        return false;
+                    }
+                    observeSegmentIndex();
+                    return true;
+                } catch (final SabrProtocolException ignoredFallback) {
+                    return false;
+                }
+            } catch (final Exception ignored) {
                 return false;
+            }
+        }
+
+        private void observeSegmentIndex() {
+            if (segmentIndex == null) {
+                return;
+            }
+            if (endSegment <= 0) {
+                endSegment = segmentIndex.size();
+            }
+            if (format.getApproxDurationMs() > 0 && endSegment > 0) {
+                averageDurationMs = Math.max(1L, format.getApproxDurationMs() / endSegment);
             }
         }
 
@@ -709,7 +851,7 @@ public final class YoutubeSabrStreamState {
                                       final boolean lastOnlyRangeUseObservedTiming,
                                       final int startSegmentIndexOffset,
                                       final int endSegmentIndexOffset) {
-            if (maxSegment <= 0) {
+            if (!initReceived || maxSegment <= 0) {
                 return;
             }
             if (lastOnlyRange && lastObservedSegment > 0) {
@@ -783,14 +925,15 @@ public final class YoutubeSabrStreamState {
             if (segmentIndex != null) {
                 for (int i = 1; i <= segmentIndex.size(); i++) {
                     final SabrSegmentIndex.Entry entry = segmentIndex.getEntry(i);
-                    if (entry != null && entry.getEndMs() >= timeMs) {
+                    if (entry != null && entry.getEndMs() > timeMs) {
                         return entry.getSequenceNumber();
                     }
                 }
-                return Math.max(1, segmentIndex.size());
+                return segmentIndex.size() == Integer.MAX_VALUE
+                        ? Integer.MAX_VALUE : Math.max(1, segmentIndex.size() + 1);
             }
             final long durationMs = Math.max(1, averageDurationMs);
-            final long sequenceNumber = (timeMs + durationMs - 1) / durationMs;
+            final long sequenceNumber = timeMs / durationMs + 1;
             return sequenceNumber > Integer.MAX_VALUE
                     ? Integer.MAX_VALUE
                     : Math.max(1, (int) sequenceNumber);

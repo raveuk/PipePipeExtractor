@@ -100,6 +100,29 @@ public abstract class Downloader {
                 .build(), callback);
     }
 
+    public StreamingResponse getStreaming(final String url,
+                                          @Nullable final Map<String, List<String>> headers,
+                                          @Nullable final Localization localization)
+            throws IOException, ReCaptchaException {
+        final Response response = get(url, headers, localization);
+        final byte[] raw = response.rawResponseBody() == null
+                ? new byte[0] : response.rawResponseBody();
+        return new StreamingResponse(response.responseCode(), response.responseHeaders(),
+                new ByteArrayInputStream(raw));
+    }
+
+    /**
+     * Streaming GET with a caller-supplied deadline. Implementations that support per-call
+     * timeouts should override this; the compatibility default preserves the regular behavior.
+     */
+    public StreamingResponse getStreaming(final String url,
+                                          @Nullable final Map<String, List<String>> headers,
+                                          @Nullable final Localization localization,
+                                          final long timeoutMs)
+            throws IOException, ReCaptchaException {
+        return getStreaming(url, headers, localization);
+    }
+
     /**
      * Do a HEAD request.
      *
