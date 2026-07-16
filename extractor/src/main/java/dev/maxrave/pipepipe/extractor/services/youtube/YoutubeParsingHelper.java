@@ -1698,6 +1698,7 @@ YoutubeParsingHelper {
             @Nonnull final ContentCountry contentCountry,
             @Nonnull final String videoId,
             final YoutubeStreamExtractor streamExtractor) throws IOException, ExtractionException {
+        final long callStartedAt = System.nanoTime();
         long stageStartedAt = System.nanoTime();
         final byte[] body = JsonWriter.string(
                         prepareDesktopJsonBuilder(localization, contentCountry)
@@ -1721,6 +1722,7 @@ YoutubeParsingHelper {
                 url, headers, body, localization, new Downloader.AsyncCallback() {
                     @Override
                     public void onSuccess(Response response) throws ExtractionException {
+                        logPerformance(videoId, "call.webPage.done", callStartedAt);
                         JsonObject webPlayerResponse;
                         try {
                             webPlayerResponse = JsonUtils.toJsonObject(getValidJsonResponseBody(response));
@@ -1756,6 +1758,8 @@ YoutubeParsingHelper {
 
                     @Override
                     public void onError(final Exception error) {
+                        logPerformance(videoId, "call.webPage.fail", callStartedAt,
+                                error.getClass().getSimpleName());
                         streamExtractor.addError(error);
                     }
                 });
@@ -2634,5 +2638,16 @@ YoutubeParsingHelper {
                 + " durationMs="
                 + java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
                         System.nanoTime() - startedAtNanos));
+    }
+
+    private static void logPerformance(@Nonnull final String videoId,
+                                       @Nonnull final String stage,
+                                       final long startedAtNanos,
+                                       @Nonnull final String detail) {
+        System.out.println("YT_PERF videoId=" + videoId + " stage=" + stage
+                + " durationMs="
+                + java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+                        System.nanoTime() - startedAtNanos)
+                + " detail=" + detail);
     }
 }

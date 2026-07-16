@@ -797,6 +797,7 @@ public class YoutubeStreamExtractor extends StreamExtractor {
 
         assertPageFetched();
         final String videoId = getId();
+        final long cacheStartedAt = System.nanoTime();
 
         try {
             cachedAudioStreams = new ArrayList<>();
@@ -807,17 +808,40 @@ public class YoutubeStreamExtractor extends StreamExtractor {
                     && streamType != StreamType.LIVE_STREAM
                     && streamType != StreamType.POST_LIVE_STREAM
                     && hasSabrStreamingUrl()) {
+                logPerformance(videoId, "streams.path", cacheStartedAt,
+                        "path=sabr,client=" + selectedClient
+                                + ",sabrUrl=" + hasSabrStreamingUrl());
                 buildSabrStreams(videoId);
             } else if (!("tv_downgraded".equals(selectedClient)
                     && streamType == StreamType.LIVE_STREAM)) {
+                logPerformance(videoId, "streams.path", cacheStartedAt,
+                        "path=classic,client=" + selectedClient
+                                + ",sabrUrl=" + hasSabrStreamingUrl());
                 extractAdaptiveFormats(videoId);
             }
             if (streamType == StreamType.POST_LIVE_STREAM
                     || (streamType == StreamType.LIVE_STREAM
                         && "tv_downgraded".equals(selectedClient))
                     || "web_safari".equals(selectedClient)) {
+                logPerformance(videoId, "streams.path", cacheStartedAt,
+                        "path=hls,client=" + selectedClient
+                                + ",sabrUrl=" + hasSabrStreamingUrl());
                 tryExtractHlsStreams(videoId);
             }
+            final StringBuilder finalAudioItags = new StringBuilder();
+            for (final AudioStream cachedStream : cachedAudioStreams) {
+                if (cachedStream.getItagItem() != null) {
+                    if (finalAudioItags.length() > 0) {
+                        finalAudioItags.append(',');
+                    }
+                    finalAudioItags.append(cachedStream.getItagItem().id);
+                }
+            }
+            logPerformance(videoId, "streams.audio.final", cacheStartedAt,
+                    "itags=[" + finalAudioItags + "]");
+            logPerformance(videoId, "streams.video.final", cacheStartedAt,
+                    "video=" + cachedVideoStreams.size()
+                            + ",videoOnly=" + cachedVideoOnlyStreams.size());
             streamsCached = true;
         } catch (final Exception e) {
             throw new ParsingException("Could not get streams", e);
@@ -833,6 +857,7 @@ public class YoutubeStreamExtractor extends StreamExtractor {
      * the selected itag to fetch media.</p>
      */
     private void buildSabrStreams(@Nonnull final String videoId) {
+        final long sabrStartedAt = System.nanoTime();
         final YoutubeSabrInfo sabrInfo = buildSabrInfo(videoId);
         final JsonObject streamingData = getSabrStreamingData();
         if (streamingData == null) {
@@ -913,9 +938,13 @@ public class YoutubeStreamExtractor extends StreamExtractor {
 
         Collections.sort(cachedAudioStreams,
                 Comparator.comparingInt(AudioStream::getBitrate).reversed());
+        logPerformance(videoId, "streams.sabr", sabrStartedAt,
+                "audio=" + cachedAudioStreams.size()
+                        + ",video=" + cachedVideoOnlyStreams.size());
     }
 
     private void extractAdaptiveFormats(@Nonnull final String videoId) throws ParsingException {
+        final long adaptiveStartedAt = System.nanoTime();
         if (configuredStreamingData == null && webRemixStreamingData == null) {
             return;
         }
@@ -923,9 +952,18 @@ public class YoutubeStreamExtractor extends StreamExtractor {
         // WEB_REMIX (YouTube Music) streaming data is scanned FIRST so that its Premium
         // audio itags (141 AAC 256kbps / 774 Opus 256kbps) win the containSimilarStream
         // dedup below against the streams of the configured client.
+        long adaptiveStepStartedAt = System.nanoTime();
         collectAdaptiveItags(webRemixStreamingData, webRemixCpn, itags);
+        logPerformance(videoId, "streams.adaptive.webRemix", adaptiveStepStartedAt,
+                "formats=" + itags.size());
+        final int webRemixItagCount = itags.size();
+        adaptiveStepStartedAt = System.nanoTime();
         collectAdaptiveItags(configuredStreamingData, configuredCpn, itags);
+        logPerformance(videoId, "streams.adaptive.configured", adaptiveStepStartedAt,
+                "formats=" + (itags.size() - webRemixItagCount));
+        adaptiveStepStartedAt = System.nanoTime();
         deobfuscateDirectUrls(videoId, itags);
+        logPerformance(videoId, "streams.adaptive.deobfuscate", adaptiveStepStartedAt);
         for (final ItagInfo info : itags) {
             final ItagItem item = info.getItagItem();
             if (item.itagType == ItagItem.ItagType.AUDIO) {
@@ -961,6 +999,17 @@ public class YoutubeStreamExtractor extends StreamExtractor {
         }
         Collections.sort(cachedAudioStreams,
                 Comparator.comparingInt(AudioStream::getBitrate).reversed());
+        final StringBuilder audioItagIds = new StringBuilder();
+        for (final ItagInfo info : itags) {
+            if (info.getItagItem().itagType == ItagItem.ItagType.AUDIO) {
+                if (audioItagIds.length() > 0) {
+                    audioItagIds.append(',');
+                }
+                audioItagIds.append(info.getItagItem().id);
+            }
+        }
+        logPerformance(videoId, "streams.adaptive.total", adaptiveStartedAt,
+                "itagsAudio=[" + audioItagIds + "]");
     }
 
     private void collectAdaptiveItags(@Nullable final JsonObject streamingData,
@@ -1700,10 +1749,12 @@ public class YoutubeStreamExtractor extends StreamExtractor {
                         .done())
                 .getBytes(StandardCharsets.UTF_8);
         stageStartedAt = System.nanoTime();
+        final long nextCallStartedAt = System.nanoTime();
         final CancellableCall nextDataCall = getJsonPostResponseAsync(
                 NEXT, body, localization, new Downloader.AsyncCallback() {
                     @Override
                     public void onSuccess(final Response response) throws ExtractionException {
+                        logPerformance(videoId, "call.next.done", nextCallStartedAt);
                         try {
                             nextResponse = JsonUtils.toJsonObject(
                                     getValidJsonResponseBody(response));
@@ -1715,6 +1766,8 @@ public class YoutubeStreamExtractor extends StreamExtractor {
 
                     @Override
                     public void onError(final Exception error) {
+                        logPerformance(videoId, "call.next.fail", nextCallStartedAt,
+                                error.getClass().getSimpleName());
                         addError(error);
                     }
                 }
@@ -1801,6 +1854,11 @@ public class YoutubeStreamExtractor extends StreamExtractor {
         if (dislikeCall != null) {
             logCallPerformance(videoId, "request.dislike", dislikeCall);
         }
+        logPerformance(videoId, "fetchPage.sources", fetchStartedAt,
+                "configured=" + (configuredStreamingData != null)
+                        + ",webRemix=" + (webRemixStreamingData != null)
+                        + ",next=" + (nextResponse != null)
+                        + ",playerResponse=" + (playerResponse != null));
 
         throwIfErrors();
         if (playerResponse == null) {
@@ -1847,6 +1905,16 @@ public class YoutubeStreamExtractor extends StreamExtractor {
         System.out.println("YT_PERF videoId=" + videoId + " stage=" + stage
                 + " durationMs="
                 + TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAtNanos));
+    }
+
+    private static void logPerformance(@Nonnull final String videoId,
+                                       @Nonnull final String stage,
+                                       final long startedAtNanos,
+                                       @Nonnull final String detail) {
+        System.out.println("YT_PERF videoId=" + videoId + " stage=" + stage
+                + " durationMs="
+                + TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAtNanos)
+                + " detail=" + detail);
     }
 
     private void awaitRequiredCalls(@Nonnull final CancellableCall[] calls,
@@ -1995,11 +2063,13 @@ public class YoutubeStreamExtractor extends StreamExtractor {
                                              @Nonnull final Localization localization,
                                              @Nonnull final String videoId)
             throws IOException, ExtractionException {
+        final long callStartedAt = System.nanoTime();
         webCpn = generateContentPlaybackNonce();
 
         final Downloader.AsyncCallback callback = new Downloader.AsyncCallback() {
             @Override
             public void onSuccess(Response response) {
+                logPerformance(videoId, "call.jsonPlayer.done", callStartedAt, "client=web");
                 JsonObject webPlayerResponse = null;
                 try {
                     webPlayerResponse = JsonUtils.toJsonObject(getValidJsonResponseBody(response));
@@ -2028,6 +2098,8 @@ public class YoutubeStreamExtractor extends StreamExtractor {
 
             @Override
             public void onError(final Exception error) {
+                logPerformance(videoId, "call.jsonPlayer.fail", callStartedAt,
+                        "client=web,error=" + error.getClass().getSimpleName());
                 addError(error);
             }
         };
@@ -2045,11 +2117,13 @@ public class YoutubeStreamExtractor extends StreamExtractor {
                                                   @Nonnull final Localization localization,
                                                   @Nonnull final String videoId)
             throws IOException, ExtractionException {
+        final long callStartedAt = System.nanoTime();
         mwebCpn = generateContentPlaybackNonce();
 
         final Downloader.AsyncCallback callback = new Downloader.AsyncCallback() {
             @Override
             public void onSuccess(Response response) {
+                logPerformance(videoId, "call.jsonPlayer.done", callStartedAt, "client=mweb");
                 try {
                     final JsonObject mwebPlayerResponse = JsonUtils.toJsonObject(getValidJsonResponseBody(response));
                     if (isPlayerResponseNotValid(mwebPlayerResponse, videoId)) {
@@ -2079,6 +2153,8 @@ public class YoutubeStreamExtractor extends StreamExtractor {
 
             @Override
             public void onError(final Exception error) {
+                logPerformance(videoId, "call.jsonPlayer.fail", callStartedAt,
+                        "client=mweb,error=" + error.getClass().getSimpleName());
                 addError(error);
             }
         };
@@ -2106,21 +2182,31 @@ public class YoutubeStreamExtractor extends StreamExtractor {
                                                     @Nonnull final Localization localization,
                                                     @Nonnull final String videoId)
             throws IOException, ExtractionException {
+        final long callStartedAt = System.nanoTime();
         webRemixCpn = generateContentPlaybackNonce();
 
         final Downloader.AsyncCallback callback = new Downloader.AsyncCallback() {
             @Override
             public void onSuccess(final Response response) {
+                logPerformance(videoId, "call.webRemix.done", callStartedAt);
                 try {
                     final JsonObject webRemixPlayerResponse =
                             JsonUtils.toJsonObject(getValidJsonResponseBody(response));
                     if (isPlayerResponseNotValid(webRemixPlayerResponse, videoId)) {
+                        logPerformance(videoId, "webRemix.response", callStartedAt,
+                                webRemixPlayerResponse.toString().contains("Sign in to confirm")
+                                        ? "invalid_signin" : "invalid");
                         throw new ExtractionException(
                                 "WebRemix player response is not valid");
                     }
 
                     final JsonObject streamingData =
                             webRemixPlayerResponse.getObject(STREAMING_DATA);
+                    final JsonArray remixAdaptiveFormats = streamingData == null
+                            ? null : streamingData.getArray(ADAPTIVE_FORMATS);
+                    logPerformance(videoId, "webRemix.response", callStartedAt,
+                            "valid formats=" + (remixAdaptiveFormats == null
+                                    ? 0 : remixAdaptiveFormats.size()));
                     if (!isNullOrEmpty(streamingData)) {
                         webRemixStreamingData = streamingData;
                         // Use the WEB_REMIX response as a fallback playerResponse when the
@@ -2137,6 +2223,8 @@ public class YoutubeStreamExtractor extends StreamExtractor {
 
             @Override
             public void onError(final Exception error) {
+                logPerformance(videoId, "call.webRemix.fail", callStartedAt,
+                        error.getClass().getSimpleName());
                 // Supplementary source: never record errors that could fail extraction.
                 error.printStackTrace();
             }
@@ -2154,10 +2242,12 @@ public class YoutubeStreamExtractor extends StreamExtractor {
             @Nonnull final ContentCountry contentCountry,
             @Nonnull final Localization localization,
             @Nonnull final String videoId) throws IOException, ExtractionException {
+        final long callStartedAt = System.nanoTime();
         final String cpn = generateContentPlaybackNonce();
         final Downloader.AsyncCallback callback = new Downloader.AsyncCallback() {
             @Override
             public void onSuccess(final Response response) {
+                logPerformance(videoId, "call.mwebHls.done", callStartedAt);
                 try {
                     final JsonObject mwebPlayerResponse = JsonUtils.toJsonObject(
                             getValidJsonResponseBody(response));
@@ -2173,6 +2263,8 @@ public class YoutubeStreamExtractor extends StreamExtractor {
 
             @Override
             public void onError(final Exception error) {
+                logPerformance(videoId, "call.mwebHls.fail", callStartedAt,
+                        error.getClass().getSimpleName());
                 addError(error);
             }
         };
@@ -2188,6 +2280,7 @@ public class YoutubeStreamExtractor extends StreamExtractor {
             @Nonnull final Localization localization,
             @Nonnull final String videoId,
             @Nonnull final String selectedClient) throws IOException, ExtractionException {
+        final long callStartedAt = System.nanoTime();
         final PlayerClient client = PlayerClient.forName(selectedClient);
         configuredCpn = generateContentPlaybackNonce();
         final JsonBuilder<JsonObject> clientBuilder = JsonObject.builder()
@@ -2224,6 +2317,8 @@ public class YoutubeStreamExtractor extends StreamExtractor {
         final Downloader.AsyncCallback callback = new Downloader.AsyncCallback() {
             @Override
             public void onSuccess(final Response response) {
+                logPerformance(videoId, "call.jsonPlayer.done", callStartedAt,
+                        "client=" + selectedClient);
                 try {
                     final JsonObject configuredResponse = JsonUtils.toJsonObject(
                             getValidJsonResponseBody(response));
@@ -2247,6 +2342,9 @@ public class YoutubeStreamExtractor extends StreamExtractor {
 
             @Override
             public void onError(final Exception error) {
+                logPerformance(videoId, "call.jsonPlayer.fail", callStartedAt,
+                        "client=" + selectedClient
+                                + ",error=" + error.getClass().getSimpleName());
                 addError(error);
             }
         };

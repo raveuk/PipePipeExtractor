@@ -140,6 +140,13 @@ public class StreamInfo extends Info {
                 logPerformance(performanceId, "sponsorBlock.wait", startTime);
             }
             logPerformance(performanceId, "streamInfo.total", totalStartedAt);
+            logPerformance(performanceId, "extraction.done", totalStartedAt,
+                    "audio=" + (streamInfo.getAudioStreams() == null
+                            ? 0 : streamInfo.getAudioStreams().size())
+                            + ",video=" + (streamInfo.getVideoStreams() == null
+                                    ? 0 : streamInfo.getVideoStreams().size())
+                            + ",videoOnly=" + (streamInfo.getVideoOnlyStreams() == null
+                                    ? 0 : streamInfo.getVideoOnlyStreams().size()));
             return streamInfo;
 
         } catch (final ExtractionException e) {
@@ -272,6 +279,16 @@ public class StreamInfo extends Info {
         System.out.println("YT_PERF videoId=" + id + " stage=" + stage
                 + " durationMs="
                 + TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAtNanos));
+    }
+
+    private static void logPerformance(@Nonnull final String id,
+                                       @Nonnull final String stage,
+                                       final long startedAtNanos,
+                                       @Nonnull final String detail) {
+        System.out.println("YT_PERF videoId=" + id + " stage=" + stage
+                + " durationMs="
+                + TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAtNanos)
+                + " detail=" + detail);
     }
 
     @SuppressWarnings("MethodLength")
