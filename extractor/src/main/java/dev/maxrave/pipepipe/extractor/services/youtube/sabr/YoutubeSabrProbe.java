@@ -6,14 +6,17 @@ import com.grack.nanojson.JsonObject;
 import com.grack.nanojson.JsonWriter;
 
 import dev.maxrave.pipepipe.extractor.NewPipe;
+import dev.maxrave.pipepipe.extractor.ServiceList;
 import dev.maxrave.pipepipe.extractor.downloader.Response;
 import dev.maxrave.pipepipe.extractor.downloader.StreamingResponse;
 import dev.maxrave.pipepipe.extractor.exceptions.ExtractionException;
 import dev.maxrave.pipepipe.extractor.exceptions.ParsingException;
 import dev.maxrave.pipepipe.extractor.localization.ContentCountry;
 import dev.maxrave.pipepipe.extractor.localization.Localization;
+import dev.maxrave.pipepipe.extractor.services.youtube.YoutubeApiDecoder;
 import dev.maxrave.pipepipe.extractor.services.youtube.YoutubeJavaScriptPlayerManager;
 import dev.maxrave.pipepipe.extractor.services.youtube.YoutubeParsingHelper;
+import dev.maxrave.pipepipe.extractor.services.youtube.YoutubeSessionPoToken;
 import dev.maxrave.pipepipe.extractor.utils.JsonUtils;
 
 import javax.annotation.Nonnull;
@@ -22,12 +25,14 @@ import java.io.FilterInputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.UnsupportedEncodingException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public final class YoutubeSabrProbe {
     private static final String PLAYER = "player";
@@ -54,10 +59,106 @@ public final class YoutubeSabrProbe {
                                                 @Nullable final String playerPoToken,
                                                 @Nullable final String visitorDataOverride)
             throws IOException, ExtractionException {
+        final String clientVersion = resolveClientVersion(profile);
+        final PlayerIdentityPair playerIdentity = resolvePlayerIdentity(profile, clientVersion,
+                localization, contentCountry, playerPoToken, visitorDataOverride);
+        return fetchSabrInfoWithIdentity(videoId, profile, localization, contentCountry,
+                clientVersion, playerIdentity);
+    }
+
+    @Nonnull
+    static YoutubeSabrInfo fetchSabrInfoRequiringSessionPoToken(
+            @Nonnull final String videoId,
+            @Nonnull final YoutubeSabrClientProfile profile,
+            @Nonnull final Localization localization,
+            @Nonnull final ContentCountry contentCountry,
+            @Nonnull final SabrPoTokenProvider poTokenProvider)
+            throws IOException, ExtractionException {
+        final String clientVersion = resolveClientVersion(profile);
+        final PlayerIdentityPair playerIdentity = resolveRequiredPlayerIdentity(profile,
+                clientVersion, localization, contentCountry, poTokenProvider);
+        return fetchSabrInfoWithIdentity(videoId, profile, localization, contentCountry,
+                clientVersion, playerIdentity);
+    }
+
+    @Nonnull
+    private static YoutubeSabrInfo fetchSabrInfoWithIdentity(
+            @Nonnull final String videoId,
+            @Nonnull final YoutubeSabrClientProfile profile,
+            @Nonnull final Localization localization,
+            @Nonnull final ContentCountry contentCountry,
+            @Nonnull final String clientVersion,
+            @Nonnull final PlayerIdentityPair playerIdentity)
+            throws IOException, ExtractionException {
         final String cpn = YoutubeParsingHelper.generateContentPlaybackNonce();
         final JsonObject playerResponse = fetchPlayerResponse(videoId, profile, localization,
-                contentCountry, cpn, playerPoToken, visitorDataOverride);
-        return fromPlayerResponse(videoId, profile, cpn, playerResponse, visitorDataOverride);
+                contentCountry, cpn, playerIdentity.playerPoToken, playerIdentity.visitorData,
+                clientVersion);
+        return fromPlayerResponse(videoId, profile, cpn, playerResponse,
+                playerIdentity.visitorData, clientVersion, playerIdentity.hasPoToken());
+    }
+
+    @Nonnull
+    static PlayerIdentityPair resolvePlayerIdentity(
+            @Nonnull final YoutubeSabrClientProfile profile,
+            @Nonnull final String clientVersion,
+            @Nonnull final Localization localization,
+            @Nonnull final ContentCountry contentCountry,
+            @Nullable final String playerPoToken,
+            @Nullable final String visitorDataOverride) {
+        final boolean hasExplicitPoToken = playerPoToken != null && !playerPoToken.isEmpty();
+        final boolean hasExplicitVisitorData = visitorDataOverride != null
+                && !visitorDataOverride.isEmpty();
+        if (hasExplicitPoToken != hasExplicitVisitorData) {
+            throw new IllegalArgumentException(
+                    "playerPoToken and visitorDataOverride must be provided together");
+        }
+        if (hasExplicitPoToken) {
+            return new PlayerIdentityPair(playerPoToken, visitorDataOverride);
+        }
+
+        final YoutubeSessionPoToken automaticToken = YoutubeParsingHelper.getSessionPoToken(
+                profile.getClientName(), clientVersion, profile.getUserAgent(),
+                localization, contentCountry);
+        return automaticToken == null
+                ? new PlayerIdentityPair(playerPoToken, visitorDataOverride)
+                : new PlayerIdentityPair(automaticToken.getPoToken(),
+                        automaticToken.getVisitorData());
+    }
+
+    @Nonnull
+    static PlayerIdentityPair resolveRequiredPlayerIdentity(
+            @Nonnull final YoutubeSabrClientProfile profile,
+            @Nonnull final String clientVersion,
+            @Nonnull final Localization localization,
+            @Nonnull final ContentCountry contentCountry,
+            @Nonnull final SabrPoTokenProvider poTokenProvider)
+            throws IOException, ExtractionException {
+        final YoutubeSessionPoToken token = poTokenProvider.getSessionPoToken(
+                profile.getClientName(), clientVersion, profile.getUserAgent(), localization,
+                contentCountry, ServiceList.YouTube.hasTokens());
+        if (token == null || token.getPoToken().isEmpty() || token.getVisitorData().isEmpty()) {
+            throw new SabrProtocolException(
+                    "SABR attestation identity rotation returned no session PO token");
+        }
+        return new PlayerIdentityPair(token.getPoToken(), token.getVisitorData());
+    }
+
+    static final class PlayerIdentityPair {
+        @Nullable
+        final String playerPoToken;
+        @Nullable
+        final String visitorData;
+
+        private PlayerIdentityPair(@Nullable final String playerPoToken,
+                                   @Nullable final String visitorData) {
+            this.playerPoToken = playerPoToken;
+            this.visitorData = visitorData;
+        }
+
+        private boolean hasPoToken() {
+            return playerPoToken != null && !playerPoToken.isEmpty();
+        }
     }
 
     @Nonnull
@@ -66,32 +167,77 @@ public final class YoutubeSabrProbe {
                                                      @Nonnull final String cpn,
                                                      @Nonnull final JsonObject playerResponse)
             throws ExtractionException {
-        return fromPlayerResponse(videoId, profile, cpn, playerResponse, null);
+        return fromPlayerResponse(videoId, profile, cpn, playerResponse, null,
+                resolveClientVersion(profile));
     }
 
     @Nonnull
-    private static YoutubeSabrInfo fromPlayerResponse(@Nonnull final String videoId,
-                                                      @Nonnull final YoutubeSabrClientProfile profile,
-                                                      @Nonnull final String cpn,
-                                                      @Nonnull final JsonObject playerResponse,
-                                                      @Nullable final String visitorDataOverride)
+    public static YoutubeSabrInfo fromPlayerResponse(@Nonnull final String videoId,
+                                                     @Nonnull final YoutubeSabrClientProfile profile,
+                                                     @Nonnull final String cpn,
+                                                     @Nonnull final JsonObject playerResponse,
+                                                     @Nullable final String visitorDataOverride)
             throws ExtractionException {
+        return fromPlayerResponse(videoId, profile, cpn, playerResponse, visitorDataOverride,
+                resolveClientVersion(profile));
+    }
+
+    @Nonnull
+    public static YoutubeSabrInfo fromPlayerResponse(
+            @Nonnull final String videoId,
+            @Nonnull final YoutubeSabrClientProfile profile,
+            @Nonnull final String cpn,
+            @Nonnull final JsonObject playerResponse,
+            @Nullable final String visitorDataOverride,
+            @Nonnull final String clientVersion) throws ExtractionException {
+        return fromPlayerResponse(videoId, profile, cpn, playerResponse, visitorDataOverride,
+                clientVersion, false);
+    }
+
+    @Nonnull
+    private static YoutubeSabrInfo fromPlayerResponse(
+            @Nonnull final String videoId,
+            @Nonnull final YoutubeSabrClientProfile profile,
+            @Nonnull final String cpn,
+            @Nonnull final JsonObject playerResponse,
+            @Nullable final String visitorDataOverride,
+            @Nonnull final String clientVersion,
+            final boolean playerPoTokenAttached) throws ExtractionException {
         final JsonObject streamingData = playerResponse.getObject(STREAMING_DATA);
         if (streamingData == null) {
             throw new SabrProtocolException("Player response has no streamingData for " + profile);
         }
 
-        final String serverAbrStreamingUrl = maybeDeobfuscateNParameter(videoId,
-                streamingData.getString("serverAbrStreamingUrl"));
+        final String unresolvedServerAbrStreamingUrl =
+                streamingData.getString("serverAbrStreamingUrl");
         final String ustreamerConfig = extractVideoPlaybackUstreamerConfig(playerResponse);
         final String visitorData = visitorDataOverride == null || visitorDataOverride.isEmpty()
                 ? extractVisitorData(playerResponse)
                 : visitorDataOverride;
         final JsonArray adaptiveFormats = streamingData.getArray(ADAPTIVE_FORMATS);
+        final List<YoutubeSabrFormat> formats =
+                YoutubeSabrFormat.parseAdaptiveFormats(adaptiveFormats);
+        final Set<String> signatures = new LinkedHashSet<>();
+        final Set<String> nParameters = new LinkedHashSet<>();
+        YoutubeSabrFormat.collectDecodeParameters(formats, signatures, nParameters);
+        final String serverAbrN = YoutubeSabrFormat.extractNParameter(
+                unresolvedServerAbrStreamingUrl);
+        if (serverAbrN != null) {
+            nParameters.add(serverAbrN);
+        }
+        String serverAbrStreamingUrl = unresolvedServerAbrStreamingUrl;
+        if (!signatures.isEmpty() || !nParameters.isEmpty()) {
+            final YoutubeApiDecoder.BatchDecodeResult decoded =
+                    YoutubeJavaScriptPlayerManager.deobfuscateBatch(videoId,
+                            new ArrayList<>(signatures), new ArrayList<>(nParameters));
+            YoutubeSabrFormat.resolveInitializationUrls(formats, decoded);
+            serverAbrStreamingUrl = YoutubeSabrFormat.resolveNParameter(
+                    unresolvedServerAbrStreamingUrl, decoded);
+        }
 
-        return new YoutubeSabrInfo(profile, videoId, cpn, resolveClientVersion(profile),
+        return new YoutubeSabrInfo(profile, videoId, cpn, clientVersion,
                 visitorData, serverAbrStreamingUrl, ustreamerConfig,
-                YoutubeSabrFormat.fromAdaptiveFormats(videoId, adaptiveFormats));
+                formats, playerPoTokenAttached);
     }
 
     @Nonnull
@@ -400,6 +546,23 @@ public final class YoutubeSabrProbe {
             @Nullable final File segmentSpoolDirectory,
             @Nonnull final Localization localization)
             throws IOException, ExtractionException {
+        return postMediaRequest(info, requestBody, requestNumber, serverAbrStreamingUrlOverride,
+                segmentConsumer, segmentStartConsumer, segmentSpoolDirectory, localization,
+                SabrMediaProtocol.builtin());
+    }
+
+    @Nonnull
+    static YoutubeSabrProbeResult postMediaRequest(
+            @Nonnull final YoutubeSabrInfo info,
+            @Nonnull final byte[] requestBody,
+            final int requestNumber,
+            @Nullable final String serverAbrStreamingUrlOverride,
+            @Nullable final SabrStreamingResponseReader.StoppableSegmentConsumer segmentConsumer,
+            @Nullable final SabrStreamingResponseReader.SegmentConsumer segmentStartConsumer,
+            @Nullable final File segmentSpoolDirectory,
+            @Nonnull final Localization localization,
+            @Nonnull final SabrMediaProtocol mediaProtocol)
+            throws IOException, ExtractionException {
         final String serverAbrStreamingUrl = serverAbrStreamingUrlOverride == null
                 || serverAbrStreamingUrlOverride.isEmpty()
                 ? info.getServerAbrStreamingUrl()
@@ -439,9 +602,10 @@ public final class YoutubeSabrProbe {
             final CountingInputStream body = new CountingInputStream(response.body());
             final SabrStreamingResponseReader.Result streamed =
                     timedConsumer == null && timedStartConsumer == null
-                            ? SabrStreamingResponseReader.read(body)
+                            ? SabrStreamingResponseReader.readUntil(body, null, null, null,
+                            mediaProtocol)
                             : SabrStreamingResponseReader.readUntil(body, timedConsumer,
-                                    timedStartConsumer, segmentSpoolDirectory);
+                                    timedStartConsumer, segmentSpoolDirectory, mediaProtocol);
             final long requestElapsedMs = elapsedMs(requestStartNs);
             return new YoutubeSabrProbeResult(info, streamed.getDecodedResponse(),
                     streamed.getSegments(), streamed.getSegmentCount(), response.responseCode(),
@@ -504,14 +668,15 @@ public final class YoutubeSabrProbe {
                                                    @Nonnull final ContentCountry contentCountry,
                                                    @Nonnull final String cpn,
                                                    @Nullable final String playerPoToken,
-                                                   @Nullable final String visitorDataOverride)
+                                                   @Nullable final String visitorDataOverride,
+                                                   @Nonnull final String clientVersion)
             throws IOException, ExtractionException {
         final byte[] body = createPlayerBody(videoId, profile, localization, contentCountry,
-                cpn, playerPoToken, visitorDataOverride);
+                cpn, playerPoToken, visitorDataOverride, clientVersion);
         final String url = getInnertubeBaseUrl(profile) + PLAYER + "?"
                 + YoutubeParsingHelper.DISABLE_PRETTY_PRINT_PARAMETER;
         final Response response = NewPipe.getDownloader().post(url,
-                buildPlayerHeaders(profile, visitorDataOverride),
+                buildPlayerHeaders(profile, visitorDataOverride, clientVersion),
                 body, localization);
         return JsonUtils.toJsonObject(YoutubeParsingHelper.getValidJsonResponseBody(response));
     }
@@ -523,13 +688,14 @@ public final class YoutubeSabrProbe {
                                             @Nonnull final ContentCountry contentCountry,
                                             @Nonnull final String cpn,
                                             @Nullable final String playerPoToken,
-                                            @Nullable final String visitorDataOverride)
+                                            @Nullable final String visitorDataOverride,
+                                            @Nonnull final String clientVersion)
             throws ParsingException {
         final JsonBuilder<JsonObject> builder = JsonObject.builder()
                 .object("context")
                     .object("client")
                         .value("clientName", profile.getClientName())
-                        .value("clientVersion", resolveClientVersion(profile))
+                        .value("clientVersion", clientVersion)
                         .value("hl", localization.getLocalizationCode())
                         .value("gl", contentCountry.getCountryCode())
                         .value("utcOffsetMinutes", 0);
@@ -551,7 +717,7 @@ public final class YoutubeSabrProbe {
         if (profile.getOsVersion() != null) {
             builder.value("osVersion", profile.getOsVersion());
         }
-        if (profile == YoutubeSabrClientProfile.MWEB && profile.getUserAgent() != null) {
+        if (profile.getUserAgent() != null) {
             builder.value("userAgent", profile.getUserAgent());
         }
         if (profile == YoutubeSabrClientProfile.ANDROID) {
@@ -618,13 +784,14 @@ public final class YoutubeSabrProbe {
     @Nonnull
     private static Map<String, List<String>> buildPlayerHeaders(
             @Nonnull final YoutubeSabrClientProfile profile) throws IOException, ExtractionException {
-        return buildPlayerHeaders(profile, null);
+        return buildPlayerHeaders(profile, null, resolveClientVersion(profile));
     }
 
     @Nonnull
     private static Map<String, List<String>> buildPlayerHeaders(
             @Nonnull final YoutubeSabrClientProfile profile,
-            @Nullable final String visitorDataOverride) throws IOException, ExtractionException {
+            @Nullable final String visitorDataOverride,
+            @Nonnull final String clientVersion) throws IOException, ExtractionException {
         final Map<String, List<String>> headers = new HashMap<>();
         headers.put("Content-Type", Collections.singletonList("application/json"));
         if (visitorDataOverride != null && !visitorDataOverride.isEmpty()) {
@@ -642,7 +809,7 @@ public final class YoutubeSabrProbe {
             headers.put("Referer", Collections.singletonList("https://www.youtube.com"));
             headers.put("X-YouTube-Client-Name", Collections.singletonList(profile.getClientId()));
             headers.put("X-YouTube-Client-Version",
-                    Collections.singletonList(resolveClientVersion(profile)));
+                    Collections.singletonList(clientVersion));
             YoutubeParsingHelper.addLoggedInHeaders(headers);
             if (!headers.containsKey("Cookie")) {
                 YoutubeParsingHelper.addCookieHeader(headers);
@@ -652,7 +819,7 @@ public final class YoutubeSabrProbe {
     }
 
     @Nonnull
-    private static Map<String, List<String>> buildSabrHeaders(@Nonnull final YoutubeSabrInfo info) {
+    static Map<String, List<String>> buildSabrHeaders(@Nonnull final YoutubeSabrInfo info) {
         final Map<String, List<String>> headers = new HashMap<>();
         headers.put("Content-Type", Collections.singletonList("application/x-protobuf"));
         headers.put("Accept", Collections.singletonList("application/vnd.yt-ump"));
@@ -664,14 +831,6 @@ public final class YoutubeSabrProbe {
                 && info.getVisitorData() != null && !info.getVisitorData().isEmpty()) {
             headers.put("X-Goog-Visitor-Id", Collections.singletonList(info.getVisitorData()));
         }
-        if (isWebSabrProfile(info.getProfile())) {
-            headers.remove("Content-Type");
-            headers.remove("Accept-Encoding");
-            headers.put("Accept", Collections.singletonList("*/*"));
-            headers.put("Accept-Language", Collections.singletonList("en-US,en;q=0.9"));
-            headers.put("Origin", Collections.singletonList("https://www.youtube.com"));
-            headers.put("Referer", Collections.singletonList("https://www.youtube.com/"));
-        }
         return headers;
     }
 
@@ -681,12 +840,12 @@ public final class YoutubeSabrProbe {
     }
 
     @Nonnull
-    private static String withSabrSessionParameters(@Nonnull final String url,
-                                                    @Nonnull final String cpn,
-                                                    final int requestNumber) {
+    static String withSabrSessionParameters(@Nonnull final String url,
+                                            @Nonnull final String cpn,
+                                            final int requestNumber) {
         String result = appendQueryParameterIfMissing(url, "alr", "yes");
         result = appendQueryParameterIfMissing(result, "cpn", cpn);
-        return setQueryParameter(result, "rn", String.valueOf(requestNumber + 1));
+        return setQueryParameter(result, "rn", String.valueOf(requestNumber));
     }
 
     @Nonnull
@@ -780,55 +939,4 @@ public final class YoutubeSabrProbe {
         return current.getString("videoPlaybackUstreamerConfig");
     }
 
-    @Nullable
-    static String maybeDeobfuscateNParameter(@Nonnull final String videoId,
-                                             @Nullable final String url)
-            throws ParsingException {
-        if (url == null || url.isEmpty()) {
-            return url;
-        }
-        final java.util.regex.Matcher queryMatcher = java.util.regex.Pattern.compile("([?&])n=([^&]+)")
-                .matcher(url);
-        if (queryMatcher.find()) {
-            final String encryptedN = urlDecode(queryMatcher.group(2));
-            final dev.maxrave.pipepipe.extractor.services.youtube.YoutubeApiDecoder.BatchDecodeResult result =
-                    YoutubeJavaScriptPlayerManager.deobfuscateBatch(videoId, null,
-                            Collections.singletonList(encryptedN));
-            final String decryptedN = result.getNParameters().get(encryptedN);
-            if (decryptedN != null) {
-                return url.substring(0, queryMatcher.start(2)) + urlEncode(decryptedN)
-                        + url.substring(queryMatcher.end(2));
-            }
-        }
-
-        final java.util.regex.Matcher pathMatcher = java.util.regex.Pattern.compile("/n/([^/]+)")
-                .matcher(url);
-        if (!pathMatcher.find()) {
-            return url;
-        }
-        final String encryptedN = pathMatcher.group(1);
-        final dev.maxrave.pipepipe.extractor.services.youtube.YoutubeApiDecoder.BatchDecodeResult result =
-                YoutubeJavaScriptPlayerManager.deobfuscateBatch(videoId, null,
-                        Collections.singletonList(encryptedN));
-        final String decryptedN = result.getNParameters().get(encryptedN);
-        return decryptedN == null ? url : url.replace("/n/" + encryptedN, "/n/" + decryptedN);
-    }
-
-    @Nonnull
-    private static String urlEncode(@Nonnull final String value) throws ParsingException {
-        try {
-            return java.net.URLEncoder.encode(value, StandardCharsets.UTF_8.name());
-        } catch (final UnsupportedEncodingException e) {
-            throw new ParsingException("Could not encode SABR URL parameter", e);
-        }
-    }
-
-    @Nonnull
-    private static String urlDecode(@Nonnull final String value) throws ParsingException {
-        try {
-            return java.net.URLDecoder.decode(value, StandardCharsets.UTF_8.name());
-        } catch (final UnsupportedEncodingException e) {
-            throw new ParsingException("Could not decode SABR URL parameter", e);
-        }
-    }
 }
