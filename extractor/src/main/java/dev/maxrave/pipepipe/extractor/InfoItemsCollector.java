@@ -1,7 +1,9 @@
 package dev.maxrave.pipepipe.extractor;
 
+import dev.maxrave.pipepipe.extractor.channel.ChannelInfoItem;
 import dev.maxrave.pipepipe.extractor.exceptions.FoundAdException;
 import dev.maxrave.pipepipe.extractor.exceptions.ParsingException;
+import dev.maxrave.pipepipe.extractor.playlist.PlaylistInfoItem;
 import dev.maxrave.pipepipe.extractor.stream.StreamInfo;
 import dev.maxrave.pipepipe.extractor.stream.StreamInfoItem;
 
@@ -175,10 +177,26 @@ public abstract class InfoItemsCollector<I extends InfoItem, E extends InfoItemE
             // Only check channels if we haven't already marked for removal
             if (!shouldRemove) {
                 for (String channel : filterConfig.getChannels()) {
-                    if (item instanceof StreamInfoItem && ((StreamInfoItem) item).getUploaderName() != null &&
-                            ((StreamInfoItem) item).getUploaderName().equals(channel)) {
+                    // Filter videos by uploader name
+                    if (item instanceof StreamInfoItem
+                            && ((StreamInfoItem) item).getUploaderName() != null
+                            && ((StreamInfoItem) item).getUploaderName().equals(channel)) {
                         shouldRemove = true;
-                        break;  // No need to check other channels
+                        break;
+                    }
+                    // Filter channel search results by channel name
+                    if (item instanceof ChannelInfoItem
+                            && item.getName() != null
+                            && item.getName().equals(channel)) {
+                        shouldRemove = true;
+                        break;
+                    }
+                    // Filter playlists by uploader name
+                    if (item instanceof PlaylistInfoItem
+                            && ((PlaylistInfoItem) item).getUploaderName() != null
+                            && ((PlaylistInfoItem) item).getUploaderName().equals(channel)) {
+                        shouldRemove = true;
+                        break;
                     }
                 }
             }

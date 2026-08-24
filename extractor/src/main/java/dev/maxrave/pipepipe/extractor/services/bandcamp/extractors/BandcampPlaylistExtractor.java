@@ -15,8 +15,8 @@ import org.jsoup.nodes.Document;
 import dev.maxrave.pipepipe.extractor.Page;
 import dev.maxrave.pipepipe.extractor.StreamingService;
 import dev.maxrave.pipepipe.extractor.downloader.Downloader;
-import dev.maxrave.pipepipe.extractor.exceptions.ContentNotAvailableException;
 import dev.maxrave.pipepipe.extractor.exceptions.ExtractionException;
+import dev.maxrave.pipepipe.extractor.exceptions.PaidContentException;
 import dev.maxrave.pipepipe.extractor.exceptions.ParsingException;
 import dev.maxrave.pipepipe.extractor.linkhandler.ListLinkHandler;
 import dev.maxrave.pipepipe.extractor.playlist.PlaylistExtractor;
@@ -65,7 +65,7 @@ public class BandcampPlaylistExtractor extends PlaylistExtractor {
 
         if (trackInfo.isEmpty()) {
             // Albums without trackInfo need to be purchased before they can be played
-            throw new ContentNotAvailableException("Album needs to be purchased");
+            throw new PaidContentException("Album needs to be purchased");
         }
     }
 
